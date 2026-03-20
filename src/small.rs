@@ -65,8 +65,8 @@ impl SmallSpmcWaker {
             unsafe {
                 self.waker.with_ref_mut(|w| {
                     w.write(waker.into_waker());
-                })
-            };
+                });
+            }
             self.state.store(REGISTERED, SeqCst);
             true
         } else if state == REGISTERED {
@@ -96,8 +96,8 @@ impl SmallSpmcWaker {
         unsafe {
             self.waker.with_ref_mut(|w| {
                 w.write(waker.into_waker());
-            })
-        };
+            });
+        }
         if let Err(state) = self
             .state
             .compare_exchange(OVERWRITE, REGISTERED, SeqCst, SeqCst)

@@ -24,7 +24,7 @@ impl Wake for CounterWaker {
 
 #[cfg(not(loom))]
 fn model(f: impl FnOnce()) {
-    f()
+    f();
 }
 
 fn concurrent_register_and_wake(spmc: SpmcWaker, arc: &Arc<CounterWaker>) {

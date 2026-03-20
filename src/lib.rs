@@ -115,8 +115,8 @@ impl SpmcWaker {
         unsafe {
             self.wakers[new_idx].with_ref_mut(|w| {
                 w.write(waker.into_waker());
-            })
-        };
+            });
+        }
         if let Err(state) = (self.state).compare_exchange(cur_idx, new_idx, SeqCst, SeqCst) {
             debug_assert!(state >= 2);
             unsafe { self.wakers[new_idx].with_ref_mut(|w| w.assume_init_drop()) };
