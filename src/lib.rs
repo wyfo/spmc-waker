@@ -37,7 +37,6 @@ impl IntoWaker for &Waker {
 
 const EMPTY: usize = 2;
 const WAKING: usize = 4;
-const EXCLUSIVE: usize = 8;
 
 #[derive(Debug)]
 pub struct SpmcWaker {
@@ -79,22 +78,13 @@ impl SpmcWaker {
         return self.state.fetch_add(0, SeqCst);
     }
 
-    unsafe fn register_impl<const SAFE: bool>(&self, waker: impl IntoWaker) -> bool {
+    /// # Safety
+    ///
+    /// `register` and `unregister` methods must not be called concurrently from multiple threads.
+    pub unsafe fn register<W: IntoWaker>(&self, waker: W) -> bool {
         #[cfg(debug_assertions)]
-        let _guard = (!SAFE).then(|| self.exclusive.check());
-        let mut state = self.load_state();
-        if SAFE {
-            if state & (WAKING | EXCLUSIVE) != 0 {
-                return false;
-            }
-            state = self.state.fetch_or(EXCLUSIVE, SeqCst);
-            if state & EXCLUSIVE != 0 {
-                return false;
-            } else if state & WAKING != 0 {
-                self.state.fetch_and(!EXCLUSIVE, SeqCst);
-                return false;
-            }
-        }
+        let _guard = self.exclusive.check();
+        let state = self.load_state();
         if state == EMPTY {
             unsafe {
                 self.wakers[0].with_ref_mut(|w| {
@@ -103,23 +93,16 @@ impl SpmcWaker {
             };
             self.state.store(0, SeqCst);
             true
-        } else if !SAFE && state == WAKING {
+        } else if state == WAKING {
             false
         } else {
-            self.overwrite::<SAFE>(waker, state)
+            self.overwrite(waker, state)
         }
-    }
-
-    /// # Safety
-    ///
-    /// `register` and `unregister` methods must not be called concurrently from multiple threads.
-    pub unsafe fn register<W: IntoWaker>(&self, waker: W) -> bool {
-        unsafe { self.register_impl::<false>(waker) }
     }
 
     #[cold]
     #[inline(never)]
-    fn overwrite<const SAFE: bool>(&self, waker: impl IntoWaker, cur_idx: usize) -> bool {
+    fn overwrite(&self, waker: impl IntoWaker, cur_idx: usize) -> bool {
         unsafe { assert_unchecked(cur_idx < 2) };
         if unsafe {
             self.wakers[cur_idx].with_ref(|w| w.assume_init_ref().will_wake(waker.as_waker()))
@@ -132,15 +115,9 @@ impl SpmcWaker {
                 w.write(waker.into_waker());
             })
         };
-        let exc_flag = EXCLUSIVE * SAFE as usize;
-        if let Err(state) =
-            (self.state).compare_exchange(cur_idx | exc_flag, new_idx, SeqCst, SeqCst)
-        {
-            debug_assert!(state >= 2 && state & exc_flag == exc_flag);
+        if let Err(state) = (self.state).compare_exchange(cur_idx, new_idx, SeqCst, SeqCst) {
+            debug_assert!(state >= 2);
             unsafe { self.wakers[new_idx].with_ref_mut(|w| w.assume_init_drop()) };
-            if SAFE {
-                self.state.fetch_and(!EXCLUSIVE, SeqCst);
-            }
             false
         } else {
             unsafe { self.wakers[cur_idx].with_ref_mut(|w| w.assume_init_drop()) };
@@ -148,9 +125,12 @@ impl SpmcWaker {
         }
     }
 
-    unsafe fn unregister_impl<const SAFE: bool>(&self) -> bool {
+    /// # Safety
+    ///
+    /// `register` and `unregister` methods must not be called concurrently from multiple threads.
+    pub unsafe fn unregister(&self) -> bool {
         #[cfg(debug_assertions)]
-        let _guard = (!SAFE).then(|| self.exclusive.check());
+        let _guard = self.exclusive.check();
         let state = self.load_state();
         if let Some(waker_cell) = self.wakers.get(state) {
             match self.state.compare_exchange(state, EMPTY, SeqCst, Relaxed) {
@@ -164,45 +144,13 @@ impl SpmcWaker {
         false
     }
 
-    /// # Safety
-    ///
-    /// `register` and `unregister` methods must not be called concurrently from multiple threads.
-    pub unsafe fn unregister(&self) -> bool {
-        unsafe { self.unregister_impl::<true>() }
-    }
-
-    fn take_impl<const SAFE: bool>(&self) -> Option<Waker> {
-        let state = self.load_state();
-        let exc_flag = EXCLUSIVE * SAFE as usize;
-        let waker_cell = self.wakers.get(state & !exc_flag)?;
-        if SAFE {
-            let state = self.state.fetch_or(WAKING, SeqCst);
-            if state & WAKING != 0 {
-                return None;
-            }
-            let waker = self
-                .wakers
-                .get(state & !exc_flag)
-                .map(|w| unsafe { w.with_ref(|w| w.assume_init_read()) });
-            if state & EXCLUSIVE == 0
-                || (self.state)
-                    .compare_exchange(state | WAKING, EMPTY | EXCLUSIVE, SeqCst, Relaxed)
-                    .is_err()
-            {
-                debug_assert!(self.load_state() & EXCLUSIVE == 0);
-                self.state.store(EMPTY, SeqCst);
-            }
-            waker
-        } else {
-            (self.state.compare_exchange(state, WAKING, SeqCst, Relaxed)).ok()?;
-            let waker = unsafe { waker_cell.with_ref(|w| w.assume_init_read()) };
-            self.state.store(EMPTY, SeqCst);
-            Some(waker)
-        }
-    }
-
     pub fn take(&self) -> Option<Waker> {
-        self.take_impl::<false>()
+        let state = self.load_state();
+        let waker_cell = self.wakers.get(state)?;
+        (self.state.compare_exchange(state, WAKING, SeqCst, Relaxed)).ok()?;
+        let waker = unsafe { waker_cell.with_ref(|w| w.assume_init_read()) };
+        self.state.store(EMPTY, SeqCst);
+        Some(waker)
     }
 
     pub fn wake(&self) {
@@ -215,33 +163,5 @@ impl SpmcWaker {
 impl Default for SpmcWaker {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct SafeSpmcWaker(SpmcWaker);
-
-impl SafeSpmcWaker {
-    #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
-    pub const fn new() -> Self {
-        Self(SpmcWaker::new())
-    }
-
-    pub fn register<W: IntoWaker>(&self, waker: W) -> bool {
-        unsafe { self.0.register_impl::<true>(waker) }
-    }
-
-    pub fn unregister(&self) -> bool {
-        unsafe { self.0.unregister_impl::<true>() }
-    }
-
-    pub fn take(&self) -> Option<Waker> {
-        self.0.take_impl::<true>()
-    }
-
-    pub fn wake(&self) {
-        if let Some(waker) = self.take() {
-            waker.wake();
-        }
     }
 }
