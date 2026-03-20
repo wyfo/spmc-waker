@@ -50,6 +50,7 @@ unsafe impl Send for SpmcWaker {}
 unsafe impl Sync for SpmcWaker {}
 
 impl Drop for SpmcWaker {
+    #[inline]
     fn drop(&mut self) {
         if let Some(waker) = self.wakers.get(self.state.load_mut()) {
             unsafe { waker.with_ref_mut(|w| w.assume_init_drop()) };
@@ -59,6 +60,7 @@ impl Drop for SpmcWaker {
 
 impl SpmcWaker {
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
+    #[inline]
     pub const fn new() -> Self {
         Self {
             wakers: [
@@ -81,6 +83,7 @@ impl SpmcWaker {
     /// # Safety
     ///
     /// `register` and `unregister` methods must not be called concurrently from multiple threads.
+    #[inline]
     pub unsafe fn register<W: IntoWaker>(&self, waker: W) -> bool {
         #[cfg(debug_assertions)]
         let _guard = self.exclusive.check();
@@ -89,8 +92,8 @@ impl SpmcWaker {
             unsafe {
                 self.wakers[0].with_ref_mut(|w| {
                     w.write(waker.into_waker());
-                })
-            };
+                });
+            }
             self.state.store(0, SeqCst);
             true
         } else if state == WAKING {
@@ -101,7 +104,6 @@ impl SpmcWaker {
     }
 
     #[cold]
-    #[inline(never)]
     fn overwrite(&self, waker: impl IntoWaker, cur_idx: usize) -> bool {
         unsafe { assert_unchecked(cur_idx < 2) };
         if unsafe {
@@ -128,6 +130,7 @@ impl SpmcWaker {
     /// # Safety
     ///
     /// `register` and `unregister` methods must not be called concurrently from multiple threads.
+    #[inline]
     pub unsafe fn unregister(&self) -> bool {
         #[cfg(debug_assertions)]
         let _guard = self.exclusive.check();
@@ -144,6 +147,7 @@ impl SpmcWaker {
         false
     }
 
+    #[inline]
     pub fn take(&self) -> Option<Waker> {
         let state = self.load_state();
         let waker_cell = self.wakers.get(state)?;
@@ -153,6 +157,7 @@ impl SpmcWaker {
         Some(waker)
     }
 
+    #[inline]
     pub fn wake(&self) {
         if let Some(waker) = self.take() {
             waker.wake();

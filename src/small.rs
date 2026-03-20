@@ -36,6 +36,7 @@ impl Drop for SmallSpmcWaker {
 
 impl SmallSpmcWaker {
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
+    #[inline]
     pub const fn new() -> Self {
         Self {
             state: AtomicUsize::new(EMPTY),
