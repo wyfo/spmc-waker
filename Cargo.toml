@@ -1,0 +1,26 @@
+[package]
+name = "spmc_waker"
+version = "0.1.0"
+edition = "2024"
+homepage = "https://github.com/wyfo/spmc-waker"
+keywords = [
+  "atomic",
+  "lock-free",
+  "no-std",
+  "mpsc",
+  "async",
+]
+categories = [
+  "concurrency",
+  "data-structures",
+  "no-std",
+]
+license = "MIT"
+repository = "https://github.com/wyfo/spmc-waker"
+
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+const_fn = "0.4"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
