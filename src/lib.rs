@@ -110,6 +110,9 @@ impl SpmcWaker {
         }
     }
 
+    /// # Safety
+    ///
+    /// `register` and `unregister` methods must not be called concurrently from multiple threads.
     pub unsafe fn register<W: IntoWaker>(&self, waker: W) -> bool {
         unsafe { self.register_impl::<false>(waker) }
     }
@@ -133,8 +136,11 @@ impl SpmcWaker {
         if let Err(state) =
             (self.state).compare_exchange(cur_idx | exc_flag, new_idx, SeqCst, SeqCst)
         {
-            debug_assert!(state > 2 && state & EXCLUSIVE == 0);
+            debug_assert!(state >= 2 && state & exc_flag == exc_flag);
             unsafe { self.wakers[new_idx].with_ref_mut(|w| w.assume_init_drop()) };
+            if SAFE {
+                self.state.fetch_and(!EXCLUSIVE, SeqCst);
+            }
             false
         } else {
             unsafe { self.wakers[cur_idx].with_ref_mut(|w| w.assume_init_drop()) };
@@ -158,6 +164,9 @@ impl SpmcWaker {
         false
     }
 
+    /// # Safety
+    ///
+    /// `register` and `unregister` methods must not be called concurrently from multiple threads.
     pub unsafe fn unregister(&self) -> bool {
         unsafe { self.unregister_impl::<true>() }
     }
@@ -166,20 +175,30 @@ impl SpmcWaker {
         let state = self.load_state();
         let exc_flag = EXCLUSIVE * SAFE as usize;
         let waker_cell = self.wakers.get(state & !exc_flag)?;
-        let waker = if SAFE {
+        if SAFE {
             let state = self.state.fetch_or(WAKING, SeqCst);
             if state & WAKING != 0 {
                 return None;
             }
-            self.wakers
+            let waker = self
+                .wakers
                 .get(state & !exc_flag)
-                .map(|w| unsafe { w.with_ref(|w| w.assume_init_read()) })
+                .map(|w| unsafe { w.with_ref(|w| w.assume_init_read()) });
+            if state & EXCLUSIVE == 0
+                || (self.state)
+                    .compare_exchange(state | WAKING, EMPTY | EXCLUSIVE, SeqCst, Relaxed)
+                    .is_err()
+            {
+                debug_assert!(self.load_state() & EXCLUSIVE == 0);
+                self.state.store(EMPTY, SeqCst);
+            }
+            waker
         } else {
             (self.state.compare_exchange(state, WAKING, SeqCst, Relaxed)).ok()?;
-            Some(unsafe { waker_cell.with_ref(|w| w.assume_init_read()) })
-        };
-        self.state.store(EMPTY, SeqCst);
-        waker
+            let waker = unsafe { waker_cell.with_ref(|w| w.assume_init_read()) };
+            self.state.store(EMPTY, SeqCst);
+            Some(waker)
+        }
     }
 
     pub fn take(&self) -> Option<Waker> {

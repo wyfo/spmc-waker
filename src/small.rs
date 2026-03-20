@@ -1,12 +1,12 @@
 use core::{mem::MaybeUninit, task::Waker};
 
 use crate::{
+    IntoWaker,
     loom::{
         AtomicUsize, AtomicUsizeExt,
         Ordering::{Relaxed, SeqCst},
         UnsafeCell, UnsafeCellExt,
     },
-    IntoWaker,
 };
 
 const EMPTY: usize = 0;
@@ -52,6 +52,9 @@ impl SmallSpmcWaker {
         return self.state.fetch_add(0, SeqCst);
     }
 
+    /// # Safety
+    ///
+    /// `register` and `unregister` methods must not be called concurrently from multiple threads.
     #[inline]
     pub unsafe fn register<W: IntoWaker>(&self, waker: W) -> bool {
         #[cfg(debug_assertions)]
@@ -106,6 +109,9 @@ impl SmallSpmcWaker {
         true
     }
 
+    /// # Safety
+    ///
+    /// `register` and `unregister` methods must not be called concurrently from multiple threads.
     #[inline]
     pub unsafe fn unregister(&self) -> bool {
         #[cfg(debug_assertions)]

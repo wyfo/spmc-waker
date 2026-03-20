@@ -2,8 +2,8 @@
 use std::thread;
 use std::{
     sync::{
-        atomic::{AtomicUsize, Ordering::Relaxed},
         Arc,
+        atomic::{AtomicUsize, Ordering::Relaxed},
     },
     task::{Wake, Waker},
 };
