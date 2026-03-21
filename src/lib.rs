@@ -10,11 +10,11 @@ use crate::loom::{
 #[cfg(debug_assertions)]
 mod exclusive;
 mod loom;
-pub mod small;
 
 pub trait IntoWaker {
     fn as_waker(&self) -> &Waker;
     fn into_waker(self) -> Waker;
+    fn wake(self);
 }
 
 impl IntoWaker for Waker {
@@ -24,6 +24,9 @@ impl IntoWaker for Waker {
     fn into_waker(self) -> Waker {
         self
     }
+    fn wake(self) {
+        self.wake();
+    }
 }
 
 impl IntoWaker for &Waker {
@@ -32,6 +35,9 @@ impl IntoWaker for &Waker {
     }
     fn into_waker(self) -> Waker {
         self.clone()
+    }
+    fn wake(self) {
+        self.wake_by_ref();
     }
 }
 
@@ -82,34 +88,45 @@ impl SpmcWaker {
 
     /// # Safety
     ///
-    /// `register` and `unregister` methods must not be called concurrently from multiple threads.
+    /// `try_register`, `register` and `unregister` methods must not be called concurrently
+    /// from multiple threads.
     #[inline]
-    pub unsafe fn register<W: IntoWaker>(&self, waker: W) -> bool {
+    pub unsafe fn try_register<W: IntoWaker>(&self, waker: W) -> Result<(), W> {
         #[cfg(debug_assertions)]
         let _guard = self.exclusive.check();
-        let state = self.load_state();
-        if state == EMPTY {
-            unsafe {
-                self.wakers[0].with_ref_mut(|w| {
-                    w.write(waker.into_waker());
-                });
+        match self.load_state() {
+            EMPTY => {
+                unsafe {
+                    self.wakers[0].with_ref_mut(|w| {
+                        w.write(waker.into_waker());
+                    });
+                }
+                self.state.store(0, SeqCst);
             }
-            self.state.store(0, SeqCst);
-            true
-        } else if state == WAKING {
-            false
-        } else {
-            self.overwrite(waker, state)
+            s if s & WAKING != 0 => return Err(waker),
+            idx => self.overwrite(waker, idx),
+        }
+        Ok(())
+    }
+
+    /// # Safety
+    ///
+    /// `try_register`, `register` and `unregister` methods must not be called concurrently
+    /// from multiple threads.
+    #[inline]
+    pub unsafe fn register<W: IntoWaker>(&self, waker: W) {
+        if let Err(waker) = unsafe { self.try_register(waker) } {
+            waker.wake();
         }
     }
 
     #[cold]
-    fn overwrite(&self, waker: impl IntoWaker, cur_idx: usize) -> bool {
+    fn overwrite(&self, waker: impl IntoWaker, cur_idx: usize) {
         unsafe { assert_unchecked(cur_idx < 2) };
         if unsafe {
             self.wakers[cur_idx].with_ref(|w| w.assume_init_ref().will_wake(waker.as_waker()))
         } {
-            return true;
+            return;
         }
         let new_idx = (cur_idx + 1) % 2;
         unsafe {
@@ -119,39 +136,35 @@ impl SpmcWaker {
         }
         if let Err(state) = (self.state).compare_exchange(cur_idx, new_idx, SeqCst, SeqCst) {
             debug_assert!(state >= 2);
-            unsafe { self.wakers[new_idx].with_ref_mut(|w| w.assume_init_drop()) };
-            false
+            let waker = unsafe { self.wakers[new_idx].with_ref_mut(|w| w.assume_init_read()) };
+            waker.wake();
         } else {
             unsafe { self.wakers[cur_idx].with_ref_mut(|w| w.assume_init_drop()) };
-            true
         }
     }
 
     /// # Safety
     ///
-    /// `register` and `unregister` methods must not be called concurrently from multiple threads.
+    /// `try_register`, `register` and `unregister` methods must not be called concurrently
+    /// from multiple threads.
     #[inline]
-    pub unsafe fn unregister(&self) -> bool {
+    pub unsafe fn unregister(&self) -> Option<Waker> {
         #[cfg(debug_assertions)]
         let _guard = self.exclusive.check();
         let state = self.load_state();
         if let Some(waker_cell) = self.wakers.get(state) {
             match self.state.compare_exchange(state, EMPTY, SeqCst, Relaxed) {
-                Ok(_) => {
-                    unsafe { waker_cell.with_ref_mut(|w| w.assume_init_drop()) };
-                    return true;
-                }
+                Ok(_) => return Some(unsafe { waker_cell.with_ref_mut(|w| w.assume_init_read()) }),
                 Err(s) => debug_assert!(s >= 2),
             }
         }
-        false
+        None
     }
 
     #[inline]
     pub fn take(&self) -> Option<Waker> {
-        let state = self.load_state();
-        let waker_cell = self.wakers.get(state)?;
-        (self.state.compare_exchange(state, WAKING, SeqCst, Relaxed)).ok()?;
+        self.wakers.get(self.load_state())?;
+        let waker_cell = self.wakers.get(self.state.fetch_or(WAKING, SeqCst))?;
         let waker = unsafe { waker_cell.with_ref(|w| w.assume_init_read()) };
         self.state.store(EMPTY, SeqCst);
         Some(waker)
