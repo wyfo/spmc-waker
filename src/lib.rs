@@ -79,6 +79,20 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
         }
     }
 
+    /// # Safety
+    ///
+    /// `try_register`, `register` and `unregister` methods must not be called concurrently
+    /// from multiple threads.
+    #[inline]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub unsafe fn register<W: WakerRef>(&self, waker: W) {
+        if let Err(waker) = unsafe { self.try_register(waker) } {
+            waker.wake();
+            #[cfg(loom)]
+            ::loom::hint::spin_loop();
+        }
+    }
+
     fn load_state(&self) -> usize {
         #[cfg(not(loom))]
         return self.state.load(SeqCst);
@@ -91,6 +105,7 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
     /// `try_register`, `register` and `unregister` methods must not be called concurrently
     /// from multiple threads.
     #[inline]
+    #[cfg_attr(debug_assertions, track_caller)]
     pub unsafe fn try_register<W: WakerRef>(&self, waker: W) -> Result<(), W> {
         #[cfg(all(debug_assertions, not(loom)))]
         let _guard = self.exclusive.check();
@@ -111,19 +126,6 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
             idx => self.overwrite(waker, idx),
         }
         Ok(())
-    }
-
-    /// # Safety
-    ///
-    /// `try_register`, `register` and `unregister` methods must not be called concurrently
-    /// from multiple threads.
-    #[inline]
-    pub unsafe fn register<W: WakerRef>(&self, waker: W) {
-        if let Err(waker) = unsafe { self.try_register(waker) } {
-            waker.wake();
-            #[cfg(loom)]
-            ::loom::hint::spin_loop();
-        }
     }
 
     #[cold]
@@ -154,6 +156,7 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
     /// `try_register`, `register` and `unregister` methods must not be called concurrently
     /// from multiple threads.
     #[inline]
+    #[cfg_attr(debug_assertions, track_caller)]
     pub unsafe fn unregister(&self) -> Option<Waker> {
         #[cfg(all(debug_assertions, not(loom)))]
         let _guard = self.exclusive.check();
