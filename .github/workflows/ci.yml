@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: rustfmt
+        run: cargo fmt -- --check --config "unstable_features=true,imports_granularity=Crate,group_imports=StdExternalCrate,format_code_in_doc_comments=true"
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: test
+        run: cargo test
+      - name: check doc
+        run: cargo doc
+        env:
+          RUSTDOCFLAGS: "-Dwarnings"
+
+  loom:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: loom
+        run: cargo test --test sync --test unsync --release
+        env:
+          RUSTFLAGS: --cfg loom
+          LOOM_MAX_PREEMPTIONS: 2
+
+  miri:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        seeds: [0..256, 256..512, 512..768, 768..1024, 1024..1280, 1280..1536, 1536..1792, 1792..2048]
+    steps:
+      - uses: actions/checkout@v4
+      - name: install miri
+        run: rustup install nightly && rustup +nightly component add miri
+      - name: miri
+        run: cargo +nightly miri test --test sync --test unsync
+        env:
+          MIRIFLAGS: -Zmiri-many-seeds=${{ matrix.seeds }} -Zmiri-compare-exchange-weak-failure-rate=0
