@@ -1,14 +1,15 @@
+#[cfg(all(not(loom), not(feature = "portable-atomic")))]
+pub(crate) use core::sync::atomic::AtomicUsize;
 #[cfg(not(loom))]
-pub(crate) use core::{
-    cell::UnsafeCell,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+pub(crate) use core::{cell::UnsafeCell, sync::atomic::Ordering};
 
 #[cfg(loom)]
 pub(crate) use loom::{
     cell::UnsafeCell,
     sync::atomic::{AtomicUsize, Ordering},
 };
+#[cfg(all(not(loom), feature = "portable-atomic"))]
+pub(crate) use portable_atomic::AtomicUsize;
 
 pub(crate) trait UnsafeCellExt<T> {
     unsafe fn with_ref<R, F: FnOnce(&T) -> R>(&self, f: F) -> R;
