@@ -1,3 +1,12 @@
+//! A synchronization primitive for task wakeup.
+//!
+//! This crate provides [`SpmcWaker`], a single-producer, multiple-consumer (SPMC)
+//! atomic waker.
+//!
+//! # Features
+//!
+//! - `portable-atomic`: use `portable-atomic` crate to provides functionality to
+//!   targets without atomics.
 #![cfg_attr(not(loom), no_std)]
 use core::{hint::assert_unchecked, mem::MaybeUninit, task::Waker};
 
@@ -11,9 +20,13 @@ use crate::loom::{
 mod exclusive;
 mod loom;
 
+/// Either a [`Waker`] or a `&Waker`.
 pub trait WakerRef {
+    /// Returns a reference to the waker.
     fn as_waker(&self) -> &Waker;
+    /// Returns an owned waker.
     fn into_waker(self) -> Waker;
+    /// Wakes up the task associated with this `Waker`.
     fn wake(self);
 }
 
@@ -44,6 +57,187 @@ impl WakerRef for &Waker {
 const EMPTY: usize = 2;
 const WAKING: usize = 4;
 
+/// A synchronization primitive for task wakeup.
+///
+/// Sometimes the task interested in a given event will change over time.
+/// A `SpmcWaker` can coordinate concurrent notifications with the consumer
+/// potentially "updating" the underlying task to wake up. This is useful in
+/// scenarios where a computation completes in another thread and wants to
+/// notify the consumer, but the consumer is in the process of being migrated to
+/// a new logical task.
+///
+/// Consumers should call `register` before checking the result of a computation
+/// and producers should call `wake` after producing the computation (this
+/// differs from the usual `thread::park` pattern). It is also permitted for
+/// `wake` to be called **before** `register`. This results in a no-op.
+///
+/// A single `SpmcWaker` may be reused for any number of calls to `register` or
+/// `wake`.
+///
+/// # Single-producer, multiple-consumer (SPMC)
+///
+/// `SpmcWaker` algorithm assumes a single thread calling `register`/`unregister`
+/// at a time. It is enforced by the methods' safety condition.
+///
+/// This assumption allows significant optimizations compared to a MPMC algorithm
+/// like [`AtomicWaker`].
+///
+/// # Memory ordering
+///
+/// `SpmcWaker` has a generic `SYNC` parameter which determines the
+/// synchronization guarantees.
+///
+/// ## `SYNC=true` (the default)
+///
+/// Calling `register` "acquires" all memory "released" by calls to `wake`
+/// before the call to `register`. Later calls to `wake` will wake the
+/// registered waker (on contention this wake might be triggered in `register`).
+///
+/// ## `SYNC=false`
+///
+/// This is a more advanced configuration, where there is no acquire-release
+/// synchronization between `register` and `wake`. A `wake` call may not see
+/// the waker registered by a concurrent `register`.
+///
+/// For this reason, `SpmcWaker<false>` should be paired with a total order,
+/// for example atomic `SeqCst` or RMW operations. It ensures that checking
+/// the waking condition after `register` succeeds even when a concurrent
+/// `wake` miss the registered waker.
+///
+/// It allows to optimize the algorithm even more, especially in the case
+/// where `wake` is called with no waker registered, as it becomes a single
+/// atomic load.
+///
+/// # Examples
+///
+/// Here is a simple example providing a `Flag` that can be signalled manually
+/// when it is ready.
+///
+/// ```
+/// use std::{
+///     future::Future,
+///     pin::Pin,
+///     sync::{
+///         Arc,
+///         atomic::{AtomicBool, Ordering::Relaxed},
+///     },
+///     task::{Context, Poll},
+/// };
+///
+/// use spmc_waker::SpmcWaker;
+///
+/// struct Inner {
+///     waker: SpmcWaker,
+///     set: AtomicBool,
+/// }
+///
+/// #[derive(Clone)]
+/// struct Flag(Arc<Inner>);
+///
+/// impl Flag {
+///     pub fn new() -> Self {
+///         Self(Arc::new(Inner {
+///             waker: SpmcWaker::new(),
+///             set: AtomicBool::new(false),
+///         }))
+///     }
+///
+///     pub fn signal(&self) {
+///         self.0.set.store(true, Relaxed);
+///         self.0.waker.wake();
+///     }
+/// }
+///
+/// impl Future for Flag {
+///     type Output = ();
+///
+///     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+///         // quick check to avoid registration if already done.
+///         if self.0.set.load(Relaxed) {
+///             return Poll::Ready(());
+///         }
+///
+///         // Safety: `poll` is never called concurrently for the same future.
+///         unsafe { self.0.waker.register(cx.waker()) };
+///
+///         // Need to check condition **after** `register` to avoid a race
+///         // condition that would result in lost notifications.
+///         if self.0.set.load(Relaxed) {
+///             Poll::Ready(())
+///         } else {
+///             Poll::Pending
+///         }
+///     }
+/// }
+/// ```
+///
+/// The same example with `SYNC=false` requires a total order on `set` accesses,
+/// for example with `SeqCst` ordering.
+///
+/// ```
+/// use std::{
+///     future::Future,
+///     pin::Pin,
+///     sync::{
+///         Arc,
+///         atomic::{
+///             AtomicBool,
+///             Ordering::{Relaxed, SeqCst},
+///         },
+///     },
+///     task::{Context, Poll},
+/// };
+///
+/// use spmc_waker::SpmcWaker;
+///
+/// struct Inner {
+///     waker: SpmcWaker<false>,
+///     set: AtomicBool,
+/// }
+///
+/// #[derive(Clone)]
+/// struct Flag(Arc<Inner>);
+///
+/// impl Flag {
+///     pub fn new() -> Self {
+///         Self(Arc::new(Inner {
+///             waker: SpmcWaker::new(),
+///             set: AtomicBool::new(false),
+///         }))
+///     }
+///
+///     pub fn signal(&self) {
+///         // Use seqcst ordering to synchronize with the load after `register`
+///         self.0.set.store(true, SeqCst);
+///         self.0.waker.wake();
+///     }
+/// }
+///
+/// impl Future for Flag {
+///     type Output = ();
+///
+///     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+///         // quick check to avoid registration if already done.
+///         if self.0.set.load(Relaxed) {
+///             return Poll::Ready(());
+///         }
+///
+///         // Safety: `poll` is never called concurrently for the same future.
+///         unsafe { self.0.waker.register(cx.waker()) };
+///
+///         // Need to check condition **after** `register` to avoid a race
+///         // condition that would result in lost notifications.
+///         // Use seqcst ordering so it synchronizes with the store before wake.
+///         if self.0.set.load(SeqCst) {
+///             Poll::Ready(())
+///         } else {
+///             Poll::Pending
+///         }
+///     }
+/// }
+/// ```
+///
+/// [`AtomicWaker`]: https://docs.rs/futures/latest/futures/task/struct.AtomicWaker.html
 #[derive(Debug)]
 pub struct SpmcWaker<const SYNC: bool = true> {
     wakers: [UnsafeCell<MaybeUninit<Waker>>; 2],
@@ -65,6 +259,7 @@ impl<const SYNC: bool> Drop for SpmcWaker<SYNC> {
 }
 
 impl<const SYNC: bool> SpmcWaker<SYNC> {
+    /// Creates a new `SpmcWaker`.
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[inline]
     pub const fn new() -> Self {
@@ -86,48 +281,53 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
         return self.state.fetch_add(0, SeqCst);
     }
 
+    /// Registers the waker to be notified on calls to `wake`.
+    ///
+    /// The new task will take place of any previous tasks that were registered
+    /// by previous calls to `register`. Any calls to `wake` that happen after
+    /// a call to `register` (as defined by the memory ordering rules), will
+    /// notify the `register` caller's task and deregister the waker from future
+    /// notifications. Because of this, callers should ensure `register` gets
+    /// invoked with a new `Waker` **each** time they require a wakeup.
+    ///
+    /// It is safe to call `register` with multiple other threads concurrently
+    /// calling `wake`. If `SYNC=true`, this will result in the `register`
+    /// caller's current task being notified once.
+    ///
     /// # Safety
     ///
-    /// `try_register`, `register` and `unregister` methods must not be called concurrently
-    /// from multiple threads.
-    #[inline]
-    pub unsafe fn try_register<W: WakerRef>(&self, waker: W) -> Result<(), W> {
-        #[cfg(all(debug_assertions, not(loom)))]
-        let _guard = self.exclusive.check();
-        match self.load_state() {
-            EMPTY => {
-                unsafe {
-                    self.wakers[0].with_ref_mut(|w| {
-                        w.write(waker.into_waker());
-                    });
-                }
-                if SYNC || cfg!(loom) {
-                    self.state.swap(0, SeqCst);
-                } else {
-                    self.state.store(0, SeqCst);
-                }
-            }
-            s if (SYNC && s & WAKING != 0) || (!SYNC && s == WAKING) => return Err(waker),
-            idx => self.overwrite(waker, idx),
-        }
-        Ok(())
-    }
-
-    /// # Safety
-    ///
-    /// `try_register`, `register` and `unregister` methods must not be called concurrently
+    /// `register` and `unregister` methods must not be called concurrently
     /// from multiple threads.
     #[inline]
     pub unsafe fn register<W: WakerRef>(&self, waker: W) {
-        if let Err(waker) = unsafe { self.try_register(waker) } {
-            waker.wake();
-            #[cfg(loom)]
-            ::loom::hint::spin_loop();
+        #[cfg(all(debug_assertions, not(loom)))]
+        let _guard = self.exclusive.check();
+        let state = self.load_state();
+        if state == EMPTY {
+            unsafe {
+                self.wakers[0].with_ref_mut(|w| {
+                    w.write(waker.into_waker());
+                });
+            }
+            if SYNC || cfg!(loom) {
+                self.state.swap(0, SeqCst);
+            } else {
+                self.state.store(0, SeqCst);
+            }
+        } else {
+            self.overwrite(waker, state);
         }
     }
 
     #[cold]
-    fn overwrite(&self, waker: impl WakerRef, cur_idx: usize) {
+    fn overwrite(&self, waker: impl WakerRef, state: usize) {
+        if (SYNC && state & WAKING != 0) || (!SYNC && state == WAKING) {
+            waker.wake();
+            #[cfg(loom)]
+            ::loom::hint::spin_loop();
+            return;
+        }
+        let cur_idx = state;
         unsafe { assert_unchecked(cur_idx < 2) };
         if unsafe {
             self.wakers[cur_idx].with_ref(|w| w.assume_init_ref().will_wake(waker.as_waker()))
@@ -149,9 +349,14 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
         }
     }
 
+    /// Removes the registered waker, returning it without waking it.
+    ///
+    /// Returns `None` if no waker is registered or if a concurrent `wake` is
+    /// in progress.
+    ///
     /// # Safety
     ///
-    /// `try_register`, `register` and `unregister` methods must not be called concurrently
+    /// `register` and `unregister` methods must not be called concurrently
     /// from multiple threads.
     #[inline]
     pub unsafe fn unregister(&self) -> Option<Waker> {
@@ -167,6 +372,13 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
         None
     }
 
+    /// Returns the last `Waker` passed to `register`, so that the caller can wake it.
+    ///
+    /// Sometimes, just waking the `SpmcWaker` is not fine grained enough. This allows the caller
+    /// to take the waker and then wake it separately, rather than performing both steps in one
+    /// atomic action.
+    ///
+    /// If a waker has not been registered, this returns `None`.
     #[inline]
     pub fn take(&self) -> Option<Waker> {
         if SYNC {
@@ -200,6 +412,9 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
         }
     }
 
+    /// Calls `wake` on the last `Waker` passed to `register`.
+    ///
+    /// If `register` has not been called yet, then this does nothing.
     #[inline]
     pub fn wake(&self) {
         if let Some(waker) = self.take() {
@@ -212,4 +427,9 @@ impl<const SYNC: bool> Default for SpmcWaker<SYNC> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[unsafe(no_mangle)]
+fn plop(a: &SpmcWaker<false>, w: &Waker) {
+    unsafe { a.register(w) }
 }

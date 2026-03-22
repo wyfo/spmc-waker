@@ -98,17 +98,15 @@ impl Wake for CounterWaker {
 fn concurrent_try_register_and_wake(spmc: SpmcWaker<{ super::SYNC }>, arc: &Arc<CounterWaker>) {
     let waker = Waker::from(arc.clone());
     #[cfg(not(loom))]
-    let registered = thread::scope(|s| {
+    thread::scope(|s| {
         s.spawn(|| spmc.wake());
         s.spawn(|| spmc.wake());
-        s.spawn(|| unsafe { spmc.try_register(waker) })
-            .join()
-            .unwrap()
+        s.spawn(|| unsafe { spmc.register(waker) });
     });
     #[cfg(loom)]
     let spmc = Arc::new(spmc);
     #[cfg(loom)]
-    let registered = {
+    {
         let wake1 = thread::spawn({
             let spmc = spmc.clone();
             move || spmc.wake()
@@ -119,18 +117,17 @@ fn concurrent_try_register_and_wake(spmc: SpmcWaker<{ super::SYNC }>, arc: &Arc<
         });
         let register = thread::spawn({
             let spmc = spmc.clone();
-            move || unsafe { spmc.try_register(waker) }
+            move || unsafe { spmc.register(waker) }
         });
         wake1.join().unwrap();
         wake2.join().unwrap();
-        register.join().unwrap()
-    };
+        register.join().unwrap();
+    }
     let wake_count = arc.0.load(Relaxed);
     let waker_count = Arc::strong_count(arc);
-    match (registered.is_ok(), wake_count, waker_count) {
-        (true, 1, 1) => {}  // register called before wake (or raced with it in overwrite)
-        (false, 0, 2) => {} // register raced with wake
-        (true, 0, 2) => {}  // register called after wake
+    match (wake_count, waker_count) {
+        (1, 1) => {} // register called before wake or raced with it
+        (0, 2) => {} // register called after wake
         other => panic!("unexpected outcome: {other:?}"),
     }
 }
@@ -190,7 +187,7 @@ fn concurrent_unregister_and_wake() {
         let wake_count = arc.0.load(Relaxed);
         match (unregistered.is_some(), wake_count) {
             (true, 0) => {}  // unregister called before wake
-            (false, 1) => {} // unregister raced with wake or called after wake
+            (false, 1) => {} // unregister raced with wake or called after it
             other => panic!("unexpected outcome: {other:?}"),
         }
     });
