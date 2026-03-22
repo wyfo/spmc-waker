@@ -1,7 +1,14 @@
 use std::{
     future::poll_fn,
-    sync::{Arc, atomic::Ordering::Relaxed},
-    task::{Poll, Wake, Waker},
+    ptr,
+    sync::{
+        Arc,
+        atomic::{
+            AtomicBool,
+            Ordering::{Relaxed, SeqCst},
+        },
+    },
+    task::{Poll, RawWaker, RawWakerVTable, Wake, Waker},
 };
 #[cfg(not(loom))]
 use std::{sync::atomic::AtomicUsize, thread};
@@ -12,6 +19,73 @@ use futures::executor::block_on;
 use loom::{future::block_on, model, sync::atomic::AtomicUsize, thread};
 use spmc_waker::SpmcWaker;
 
+#[cfg(not(loom))]
+fn model(f: impl FnOnce()) {
+    f();
+}
+
+#[cfg(any(debug_assertions, loom))]
+#[test]
+#[should_panic]
+fn exclusive_access() {
+    model(|| {
+        static STOP: AtomicBool = AtomicBool::new(false);
+        fn noop(_: *const ()) {}
+        fn clone(_: *const ()) -> RawWaker {
+            #[cfg(not(loom))]
+            while !STOP.load(SeqCst) {
+                std::hint::spin_loop();
+            }
+            raw_waker()
+        }
+        fn raw_waker() -> RawWaker {
+            RawWaker::new(ptr::null(), &RawWakerVTable::new(clone, noop, noop, noop))
+        }
+        struct StopGuard;
+        impl Drop for StopGuard {
+            fn drop(&mut self) {
+                STOP.store(true, SeqCst);
+            }
+        }
+        let spmc = SpmcWaker::<{ super::SYNC }>::new();
+        let waker = unsafe { Waker::from_raw(raw_waker()) };
+        #[cfg(not(loom))]
+        thread::scope(|s| {
+            s.spawn(|| {
+                let _guard = StopGuard;
+                unsafe { spmc.register(&waker) };
+            });
+            s.spawn(|| {
+                let _guard = StopGuard;
+                unsafe { spmc.register(&waker) };
+            });
+        });
+        #[cfg(loom)]
+        {
+            let spmc = Arc::new(spmc);
+            let waker = Arc::new(waker);
+            let t1 = thread::spawn({
+                let spmc = spmc.clone();
+                let waker = waker.clone();
+                move || {
+                    let _guard = StopGuard;
+                    unsafe { spmc.register(&*waker) };
+                }
+            });
+            let t2 = thread::spawn({
+                let spmc = spmc.clone();
+                let waker = waker.clone();
+                move || {
+                    let _guard = StopGuard;
+                    unsafe { spmc.register(&*waker) };
+                }
+            });
+            t1.join().unwrap();
+            t2.join().unwrap();
+        }
+    });
+}
+
 #[derive(Default)]
 struct CounterWaker(AtomicUsize);
 
@@ -19,11 +93,6 @@ impl Wake for CounterWaker {
     fn wake(self: Arc<Self>) {
         self.0.fetch_add(1, Relaxed);
     }
-}
-
-#[cfg(not(loom))]
-fn model(f: impl FnOnce()) {
-    f();
 }
 
 fn concurrent_try_register_and_wake(spmc: SpmcWaker<{ super::SYNC }>, arc: &Arc<CounterWaker>) {
@@ -131,6 +200,7 @@ fn concurrent_unregister_and_wake() {
 #[cfg(not(loom))]
 #[test]
 fn basic() {
+    let ordering = if super::SYNC { Relaxed } else { SeqCst };
     let atomic_waker = Arc::new(SpmcWaker::<{ super::SYNC }>::new());
     let atomic_waker_copy = atomic_waker.clone();
 
@@ -144,7 +214,7 @@ fn basic() {
         let mut pending_count = 0;
 
         block_on(poll_fn(move |cx| {
-            if woken_copy.load(Relaxed) == 1 {
+            if woken_copy.load(ordering) == 1 {
                 Poll::Ready(())
             } else {
                 // Assert we return pending exactly once
@@ -164,7 +234,7 @@ fn basic() {
     // give spawned thread some time to sleep in `block_on`
     thread::yield_now();
 
-    woken.store(1, Relaxed);
+    woken.store(1, ordering);
     atomic_waker.wake();
 
     t.join().unwrap();

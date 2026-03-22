@@ -9,10 +9,7 @@ impl Exclusive {
     }
 
     pub(crate) fn check(&self) -> ExclusiveGuard<'_> {
-        assert!(
-            !self.0.swap(true, Relaxed),
-            "concurrent register/unregister",
-        );
+        assert!(!self.0.swap(true, Relaxed), "concurrent access",);
         ExclusiveGuard(self)
     }
 }

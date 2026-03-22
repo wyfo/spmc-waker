@@ -7,7 +7,7 @@ use crate::loom::{
     UnsafeCell, UnsafeCellExt,
 };
 
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, not(loom)))]
 mod exclusive;
 mod loom;
 
@@ -48,7 +48,7 @@ const WAKING: usize = 4;
 pub struct SpmcWaker<const SYNC: bool = true> {
     wakers: [UnsafeCell<MaybeUninit<Waker>>; 2],
     state: AtomicUsize,
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, not(loom)))]
     exclusive: exclusive::Exclusive,
 }
 
@@ -74,7 +74,7 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
                 UnsafeCell::new(MaybeUninit::uninit()),
             ],
             state: AtomicUsize::new(EMPTY),
-            #[cfg(debug_assertions)]
+            #[cfg(all(debug_assertions, not(loom)))]
             exclusive: exclusive::Exclusive::new(),
         }
     }
@@ -92,7 +92,7 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
     /// from multiple threads.
     #[inline]
     pub unsafe fn try_register<W: WakerRef>(&self, waker: W) -> Result<(), W> {
-        #[cfg(debug_assertions)]
+        #[cfg(all(debug_assertions, not(loom)))]
         let _guard = self.exclusive.check();
         match self.load_state() {
             EMPTY => {
@@ -155,7 +155,7 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
     /// from multiple threads.
     #[inline]
     pub unsafe fn unregister(&self) -> Option<Waker> {
-        #[cfg(debug_assertions)]
+        #[cfg(all(debug_assertions, not(loom)))]
         let _guard = self.exclusive.check();
         let state = self.load_state();
         if let Some(waker_cell) = self.wakers.get(state) {
