@@ -27,9 +27,11 @@ impl<T> UnsafeCellExt<T> for UnsafeCell<T> {
 
 #[cfg(loom)]
 impl<T> UnsafeCellExt<T> for UnsafeCell<T> {
+    #[track_caller]
     unsafe fn with_ref<R, F: FnOnce(&T) -> R>(&self, f: F) -> R {
         self.with(|ptr| f(unsafe { &*ptr }))
     }
+    #[track_caller]
     unsafe fn with_ref_mut<R, F: FnOnce(&mut T) -> R>(&self, f: F) -> R {
         self.with_mut(|ptr| f(unsafe { &mut *ptr }))
     }
@@ -48,6 +50,7 @@ impl AtomicUsizeExt for AtomicUsize {
 
 #[cfg(loom)]
 impl AtomicUsizeExt for loom::sync::atomic::AtomicUsize {
+    #[track_caller]
     fn load_mut(&mut self) -> usize {
         self.with_mut(|v| *v)
     }

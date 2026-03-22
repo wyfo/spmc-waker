@@ -18,9 +18,12 @@ categories = [
 license = "MIT"
 repository = "https://github.com/wyfo/spmc-waker"
 
+[dev-dependencies]
+futures = "0.3.32"
+
 [target.'cfg(loom)'.dependencies]
-loom = "0.7"
-const_fn = "0.4"
+loom = { version = "0.7.2", features = ["futures"] }
+const_fn = "0.4.12"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

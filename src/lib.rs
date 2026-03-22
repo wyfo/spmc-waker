@@ -11,13 +11,13 @@ use crate::loom::{
 mod exclusive;
 mod loom;
 
-pub trait IntoWaker {
+pub trait WakerRef {
     fn as_waker(&self) -> &Waker;
     fn into_waker(self) -> Waker;
     fn wake(self);
 }
 
-impl IntoWaker for Waker {
+impl WakerRef for Waker {
     fn as_waker(&self) -> &Waker {
         self
     }
@@ -29,7 +29,7 @@ impl IntoWaker for Waker {
     }
 }
 
-impl IntoWaker for &Waker {
+impl WakerRef for &Waker {
     fn as_waker(&self) -> &Waker {
         self
     }
@@ -45,17 +45,17 @@ const EMPTY: usize = 2;
 const WAKING: usize = 4;
 
 #[derive(Debug)]
-pub struct SpmcWaker {
+pub struct SpmcWaker<const SYNC: bool = true> {
     wakers: [UnsafeCell<MaybeUninit<Waker>>; 2],
     state: AtomicUsize,
     #[cfg(debug_assertions)]
     exclusive: exclusive::Exclusive,
 }
 
-unsafe impl Send for SpmcWaker {}
-unsafe impl Sync for SpmcWaker {}
+unsafe impl<const SYNC: bool> Send for SpmcWaker<SYNC> {}
+unsafe impl<const SYNC: bool> Sync for SpmcWaker<SYNC> {}
 
-impl Drop for SpmcWaker {
+impl<const SYNC: bool> Drop for SpmcWaker<SYNC> {
     #[inline]
     fn drop(&mut self) {
         if let Some(waker) = self.wakers.get(self.state.load_mut()) {
@@ -64,7 +64,7 @@ impl Drop for SpmcWaker {
     }
 }
 
-impl SpmcWaker {
+impl<const SYNC: bool> SpmcWaker<SYNC> {
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[inline]
     pub const fn new() -> Self {
@@ -91,7 +91,7 @@ impl SpmcWaker {
     /// `try_register`, `register` and `unregister` methods must not be called concurrently
     /// from multiple threads.
     #[inline]
-    pub unsafe fn try_register<W: IntoWaker>(&self, waker: W) -> Result<(), W> {
+    pub unsafe fn try_register<W: WakerRef>(&self, waker: W) -> Result<(), W> {
         #[cfg(debug_assertions)]
         let _guard = self.exclusive.check();
         match self.load_state() {
@@ -101,9 +101,13 @@ impl SpmcWaker {
                         w.write(waker.into_waker());
                     });
                 }
-                self.state.store(0, SeqCst);
+                if SYNC || cfg!(loom) {
+                    self.state.swap(0, SeqCst);
+                } else {
+                    self.state.store(0, SeqCst);
+                }
             }
-            s if s & WAKING != 0 => return Err(waker),
+            s if (SYNC && s & WAKING != 0) || (!SYNC && s == WAKING) => return Err(waker),
             idx => self.overwrite(waker, idx),
         }
         Ok(())
@@ -114,14 +118,16 @@ impl SpmcWaker {
     /// `try_register`, `register` and `unregister` methods must not be called concurrently
     /// from multiple threads.
     #[inline]
-    pub unsafe fn register<W: IntoWaker>(&self, waker: W) {
+    pub unsafe fn register<W: WakerRef>(&self, waker: W) {
         if let Err(waker) = unsafe { self.try_register(waker) } {
             waker.wake();
+            #[cfg(loom)]
+            ::loom::hint::spin_loop();
         }
     }
 
     #[cold]
-    fn overwrite(&self, waker: impl IntoWaker, cur_idx: usize) {
+    fn overwrite(&self, waker: impl WakerRef, cur_idx: usize) {
         unsafe { assert_unchecked(cur_idx < 2) };
         if unsafe {
             self.wakers[cur_idx].with_ref(|w| w.assume_init_ref().will_wake(waker.as_waker()))
@@ -163,11 +169,35 @@ impl SpmcWaker {
 
     #[inline]
     pub fn take(&self) -> Option<Waker> {
-        self.wakers.get(self.load_state())?;
-        let waker_cell = self.wakers.get(self.state.fetch_or(WAKING, SeqCst))?;
-        let waker = unsafe { waker_cell.with_ref(|w| w.assume_init_read()) };
-        self.state.store(EMPTY, SeqCst);
-        Some(waker)
+        if SYNC {
+            if self.state.load(Relaxed) >= 2 && self.state.fetch_add(0, SeqCst) >= 2 {
+                return None;
+            }
+            let state = self.state.fetch_or(WAKING, SeqCst);
+            if state & WAKING != 0 {
+                return None;
+            }
+            if let Some(waker_cell) = self.wakers.get(state) {
+                let waker = unsafe { waker_cell.with_ref(|w| w.assume_init_read()) };
+                self.state.swap(EMPTY, SeqCst);
+                Some(waker)
+            } else {
+                debug_assert_eq!(state, EMPTY);
+                let _ = (self.state).compare_exchange(WAKING | EMPTY, EMPTY, SeqCst, Relaxed);
+                None
+            }
+        } else {
+            let state = self.load_state();
+            let waker_cell = self.wakers.get(state)?;
+            (self.state.compare_exchange(state, WAKING, SeqCst, Relaxed)).ok()?;
+            let waker = unsafe { waker_cell.with_ref(|w| w.assume_init_read()) };
+            if cfg!(loom) {
+                self.state.swap(EMPTY, SeqCst);
+            } else {
+                self.state.store(EMPTY, SeqCst);
+            }
+            Some(waker)
+        }
     }
 
     #[inline]
@@ -178,7 +208,7 @@ impl SpmcWaker {
     }
 }
 
-impl Default for SpmcWaker {
+impl<const SYNC: bool> Default for SpmcWaker<SYNC> {
     fn default() -> Self {
         Self::new()
     }
