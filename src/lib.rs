@@ -444,8 +444,3 @@ impl<const SYNC: bool> Default for SpmcWaker<SYNC> {
         Self::new()
     }
 }
-
-#[unsafe(no_mangle)]
-fn plop(a: &SpmcWaker<false>, w: &Waker) {
-    unsafe { a.register(w) }
-}
