@@ -29,6 +29,7 @@ impl WakerCell {
     /// The cell must be safe to access mutably.
     pub(super) unsafe fn set(&self, waker: impl WakerRef) {
         let waker = ManuallyDrop::new(waker.into_waker());
+        // SAFETY: as per function contract
         unsafe {
             self.0.with_ref_mut(|cell| {
                 cell.write((waker.data(), waker.vtable()));
@@ -38,9 +39,10 @@ impl WakerCell {
 
     /// # Safety
     ///
-    /// The cell must be safe to access immutably.
+    /// The cell must be safe to access immutably, and waker must have been set.
     pub(super) unsafe fn will_wake(&self, waker: &impl WakerRef) -> bool {
         let waker = waker.as_waker();
+        // SAFETY: as per function contract
         unsafe {
             self.0.with_ref(|cell| {
                 let (data, vtable) = cell.assume_init_read();
@@ -51,9 +53,10 @@ impl WakerCell {
 
     /// # Safety
     ///
-    /// The cell must be safe to access immutably, and the method
-    /// must be called exactly once before a new `set` call.
+    /// The cell must be safe to access immutably, waker must have been set
+    /// and the method must be called exactly once before a new `set` call.
     pub(super) unsafe fn take(&self) -> Waker {
+        // SAFETY: as per function contract
         unsafe {
             self.0.with_ref(|cell| {
                 let (data, vtable) = cell.assume_init_read();
