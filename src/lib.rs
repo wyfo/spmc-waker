@@ -8,17 +8,20 @@
 //! - `portable-atomic`: use `portable-atomic` crate to provides functionality to
 //!   targets without atomics.
 #![cfg_attr(not(loom), no_std)]
-use core::{hint::assert_unchecked, mem::MaybeUninit, task::Waker};
+use core::{hint::assert_unchecked, task::Waker};
 
-use crate::loom::{
-    AtomicUsize, AtomicUsizeExt,
-    Ordering::{Relaxed, SeqCst},
-    UnsafeCell, UnsafeCellExt,
+use crate::{
+    loom::{
+        AtomicUsize, AtomicUsizeExt,
+        Ordering::{Relaxed, SeqCst},
+    },
+    waker_cell::WakerCell,
 };
 
 #[cfg(all(debug_assertions, not(loom)))]
 mod exclusive;
 mod loom;
+mod waker_cell;
 
 /// Either a [`Waker`] or a `&Waker`.
 pub trait WakerRef {
@@ -256,7 +259,7 @@ const WAKING: usize = 4;
 /// [`AtomicWaker`]: https://docs.rs/futures/latest/futures/task/struct.AtomicWaker.html
 #[derive(Debug)]
 pub struct SpmcWaker<const SYNC: bool = true> {
-    wakers: [UnsafeCell<MaybeUninit<Waker>>; 2],
+    wakers: [WakerCell; 2],
     /// State possible values are:
     /// - 0 or 1: A waker is registered in `wakers[state]`
     /// - EMPTY: there is no waker registered
@@ -276,7 +279,7 @@ impl<const SYNC: bool> Drop for SpmcWaker<SYNC> {
         if let Some(waker) = self.wakers.get(self.state.load_mut()) {
             // SAFETY: State is the index of a waker currently registered,
             // and mutable access is safe in destructor
-            unsafe { waker.with_ref_mut(|w| w.assume_init_drop()) };
+            unsafe { drop(waker.get()) };
         }
     }
 }
@@ -287,10 +290,7 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
     #[inline]
     pub const fn new() -> Self {
         Self {
-            wakers: [
-                UnsafeCell::new(MaybeUninit::uninit()),
-                UnsafeCell::new(MaybeUninit::uninit()),
-            ],
+            wakers: [WakerCell::new(), WakerCell::new()],
             state: AtomicUsize::new(EMPTY),
             #[cfg(all(debug_assertions, not(loom)))]
             exclusive: exclusive::Exclusive::new(),
@@ -332,11 +332,7 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
             // ensures there cannot be any registered waker at this point.
             // A concurrent `take` will thus not attempt any read, so it's
             // safe to access the cell mutably.
-            unsafe {
-                self.wakers[0].with_ref_mut(|w| {
-                    w.write(waker.into_waker());
-                });
-            }
+            unsafe { self.wakers[0].set(waker) };
             if SYNC || cfg!(loom) {
                 self.state.swap(0, SeqCst);
             } else {
@@ -371,23 +367,16 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
         unsafe { assert_unchecked(cur_idx < 2) };
         // SAFETY: `overwrite` cannot be called concurrently, but `take` could. However,
         // both access the cell immutably, so it is safe.
-        if unsafe {
-            self.wakers[cur_idx].with_ref(|w| w.assume_init_ref().will_wake(waker.as_waker()))
-        } {
+        if unsafe { self.wakers[cur_idx].will_wake(&waker) } {
             return;
         }
         let new_idx = (cur_idx + 1) % 2;
-        unsafe {
-            self.wakers[new_idx].with_ref_mut(|w| {
-                w.write(waker.into_waker());
-            });
-        }
+        unsafe { self.wakers[new_idx].set(waker) };
         if let Err(state) = (self.state).compare_exchange(cur_idx, new_idx, SeqCst, SeqCst) {
             debug_assert!(state >= 2);
-            let waker = unsafe { self.wakers[new_idx].with_ref_mut(|w| w.assume_init_read()) };
-            waker.wake();
+            unsafe { self.wakers[new_idx].get().wake() }
         } else {
-            unsafe { self.wakers[cur_idx].with_ref_mut(|w| w.assume_init_drop()) };
+            unsafe { drop(self.wakers[cur_idx].get()) };
         }
     }
 
@@ -407,7 +396,7 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
         let state = self.load_state();
         if let Some(waker_cell) = self.wakers.get(state) {
             match self.state.compare_exchange(state, EMPTY, SeqCst, Relaxed) {
-                Ok(_) => return Some(unsafe { waker_cell.with_ref_mut(|w| w.assume_init_read()) }),
+                Ok(_) => return Some(unsafe { waker_cell.get() }),
                 Err(s) => debug_assert!(s >= 2),
             }
         }
@@ -432,7 +421,7 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
                 return None;
             }
             if let Some(waker_cell) = self.wakers.get(state) {
-                let waker = unsafe { waker_cell.with_ref(|w| w.assume_init_read()) };
+                let waker = unsafe { waker_cell.get() };
                 self.state.swap(EMPTY, SeqCst);
                 Some(waker)
             } else {
@@ -444,7 +433,7 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
             let state = self.load_state();
             let waker_cell = self.wakers.get(state)?;
             (self.state.compare_exchange(state, WAKING, SeqCst, Relaxed)).ok()?;
-            let waker = unsafe { waker_cell.with_ref(|w| w.assume_init_read()) };
+            let waker = unsafe { waker_cell.get() };
             if cfg!(loom) {
                 self.state.swap(EMPTY, SeqCst);
             } else {
