@@ -257,6 +257,11 @@ const WAKING: usize = 4;
 #[derive(Debug)]
 pub struct SpmcWaker<const SYNC: bool = true> {
     wakers: [UnsafeCell<MaybeUninit<Waker>>; 2],
+    /// State possible values are:
+    /// - 0 or 1: A waker is registered in `wakers[state]`
+    /// - EMPTY: there is no waker registered
+    /// - WAKING: a `wake`/`take` operation is ongoing;
+    ///   with SYNC=true, it becomes a bit-flag
     state: AtomicUsize,
     #[cfg(all(debug_assertions, not(loom)))]
     exclusive: exclusive::Exclusive,
@@ -269,6 +274,8 @@ impl<const SYNC: bool> Drop for SpmcWaker<SYNC> {
     #[inline]
     fn drop(&mut self) {
         if let Some(waker) = self.wakers.get(self.state.load_mut()) {
+            // SAFETY: State is the index of a waker currently registered,
+            // and mutable access is safe in destructor
             unsafe { waker.with_ref_mut(|w| w.assume_init_drop()) };
         }
     }
@@ -320,6 +327,11 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
         let _guard = self.exclusive.check();
         let state = self.load_state();
         if state == EMPTY {
+            // SAFETY: SeqCst protect against outdated read, and `register`
+            // cannot be called concurrently. It means that reading EMPTY
+            // ensures there cannot be any registered waker at this point.
+            // A concurrent `take` will thus not attempt any read, so it's
+            // safe to access the cell mutably.
             unsafe {
                 self.wakers[0].with_ref_mut(|w| {
                     w.write(waker.into_waker());
@@ -338,13 +350,27 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
     #[cold]
     fn overwrite(&self, waker: impl WakerRef, state: usize) {
         if (SYNC && state & WAKING != 0) || (!SYNC && state == WAKING) {
+            // A thread is currently waking the registered waker, so we can
+            // assume we should not wait and return immediately.
+            // In case the wakeup condition is still not satisfied, calling
+            // `wake` ensures the task will be scheduled again to have a
+            // second chance of registering a waker.
             waker.wake();
+            // Rescheduling means that the task could spin infinitely if a
+            // waking thread is preempted before resetting the state. This
+            // is caught by loom and requires `spin_loop` to escape the
+            // infinite loop. In practice, calling `wake` is expected to
+            // already do the job of `spin_loop`.
             #[cfg(loom)]
             ::loom::hint::spin_loop();
             return;
         }
         let cur_idx = state;
+        // SAFETY: state is not EMPTY nor WAKING, so it must be the cell index
+        // of a registered waker.
         unsafe { assert_unchecked(cur_idx < 2) };
+        // SAFETY: `overwrite` cannot be called concurrently, but `take` could. However,
+        // both access the cell immutably, so it is safe.
         if unsafe {
             self.wakers[cur_idx].with_ref(|w| w.assume_init_ref().will_wake(waker.as_waker()))
         } {

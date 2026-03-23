@@ -12,7 +12,13 @@ pub(crate) use loom::{
 pub(crate) use portable_atomic::AtomicUsize;
 
 pub(crate) trait UnsafeCellExt<T> {
+    /// # Safety
+    ///
+    /// Cell content must be safe to deref immutably.
     unsafe fn with_ref<R, F: FnOnce(&T) -> R>(&self, f: F) -> R;
+    /// # Safety
+    ///
+    /// Cell content must be safe to deref mutably.
     unsafe fn with_ref_mut<R, F: FnOnce(&mut T) -> R>(&self, f: F) -> R;
 }
 
