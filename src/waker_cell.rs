@@ -51,8 +51,9 @@ impl WakerCell {
 
     /// # Safety
     ///
-    /// The cell must be safe to access immutably.
-    pub(super) unsafe fn get(&self) -> Waker {
+    /// The cell must be safe to access immutably, and the method
+    /// must be called exactly once before a new `set` call.
+    pub(super) unsafe fn take(&self) -> Waker {
         unsafe {
             self.0.with_ref(|cell| {
                 let (data, vtable) = cell.assume_init_read();

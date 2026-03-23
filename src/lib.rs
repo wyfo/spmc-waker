@@ -277,9 +277,9 @@ impl<const SYNC: bool> Drop for SpmcWaker<SYNC> {
     #[inline]
     fn drop(&mut self) {
         if let Some(waker) = self.wakers.get(self.state.load_mut()) {
-            // SAFETY: State is the index of a waker currently registered,
-            // and mutable access is safe in destructor
-            unsafe { drop(waker.get()) };
+            // SAFETY: state is the index of a waker currently registered
+            // that must be taken back, and access is safe in destructor
+            unsafe { drop(waker.take()) };
         }
     }
 }
@@ -300,6 +300,8 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
     fn load_state(&self) -> usize {
         #[cfg(not(loom))]
         return self.state.load(SeqCst);
+        // loom doesn't support SeqCst and uses RMW operation instead
+        // to emulate the total order.
         #[cfg(loom)]
         return self.state.fetch_add(0, SeqCst);
     }
@@ -325,6 +327,8 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
     pub unsafe fn register<W: WakerRef>(&self, waker: W) {
         #[cfg(all(debug_assertions, not(loom)))]
         let _guard = self.exclusive.check();
+        // State is loaded and expected to be EMPTY. Otherwise, it means
+        // there already is a registered waker that needs to be overwritten.
         let state = self.load_state();
         if state == EMPTY {
             // SAFETY: SeqCst protect against outdated read, and `register`
@@ -333,6 +337,8 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
             // A concurrent `take` will thus not attempt any read, so it's
             // safe to access the cell mutably.
             unsafe { self.wakers[0].set(waker) };
+            // SYNC=true uses swap, as `wake` must synchronize with `register`
+            // (loom doesn't support SeqCst and uses RMW operation instead)
             if SYNC || cfg!(loom) {
                 self.state.swap(0, SeqCst);
             } else {
@@ -343,8 +349,10 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
         }
     }
 
+    // Overwriting a registered waker is expected to be rare, hence the `#[cold]` attribute.
     #[cold]
     fn overwrite(&self, waker: impl WakerRef, state: usize) {
+        // A concurrent `take` may be happening.
         if (SYNC && state & WAKING != 0) || (!SYNC && state == WAKING) {
             // A thread is currently waking the registered waker, so we can
             // assume we should not wait and return immediately.
@@ -371,12 +379,22 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
             return;
         }
         let new_idx = (cur_idx + 1) % 2;
+        // SAFETY: SeqCst protect against outdated read, and overwrite cannot be called
+        // concurrently. It means that `take` can only access the cell at `cur_idx`, so
+        // the cell at `new_idx` is safe to access immutably.
         unsafe { self.wakers[new_idx].set(waker) };
+        // The cell index is attempted to be swapped with the new one just initialized.
         if let Err(state) = (self.state).compare_exchange(cur_idx, new_idx, SeqCst, SeqCst) {
+            // State update failed, which means a concurrent `take` was happening.
+            // For the same reason as above, the task is rescheduled.
             debug_assert!(state >= 2);
-            unsafe { self.wakers[new_idx].get().wake() }
+            // SAFETY: state has not been updated, so `new_idx` cell is still safe
+            // to access, and the waker previously set can be taken back.
+            unsafe { self.wakers[new_idx].take().wake() }
         } else {
-            unsafe { drop(self.wakers[cur_idx].get()) };
+            // SAFETY: cell index has been successfully swapped, so the cell
+            // at `cur_idx` is now safe to access to take its waker.
+            unsafe { drop(self.wakers[cur_idx].take()) };
         }
     }
 
@@ -396,7 +414,9 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
         let state = self.load_state();
         if let Some(waker_cell) = self.wakers.get(state) {
             match self.state.compare_exchange(state, EMPTY, SeqCst, Relaxed) {
-                Ok(_) => return Some(unsafe { waker_cell.get() }),
+                // SAFETY: state has been swapped to EMPTY, so the cell can
+                // no more be accessed by `take, and its waker can be taken
+                Ok(_) => return Some(unsafe { waker_cell.take() }),
                 Err(s) => debug_assert!(s >= 2),
             }
         }
@@ -413,27 +433,60 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
     #[inline]
     pub fn take(&self) -> Option<Waker> {
         if SYNC {
+            // SYNC=true requires to do a Release write on the state, but we don't want
+            // to set the WAKING bit if there is no waker, as it would require to unset it.
+            // So we attempt a `fetch_add(0)` and hope for no concurrent `register`.
             if self.state.load(Relaxed) >= 2 && self.state.fetch_add(0, SeqCst) >= 2 {
                 return None;
             }
+            // There should be a waker registered, set the WAKING bit.
             let state = self.state.fetch_or(WAKING, SeqCst);
+            // A concurrent `take` has won the race, just return.
             if state & WAKING != 0 {
                 return None;
             }
             if let Some(waker_cell) = self.wakers.get(state) {
-                let waker = unsafe { waker_cell.get() };
+                // SAFETY: the state is locked on WAKING, the cell can be concurrently
+                // accessed with `will_wake`, but it can still be accessed immutably.
+                // The waker is taken before resetting the state.
+                let waker = unsafe { waker_cell.take() };
+                // At this point the only concurrent operation will be:
+                // - fetch_or(0), no issue
+                // - fetch_or(WAKING), another `take` is losing the race
+                // - CAS(new_idx, cur_idx), will fail because of WAKING flag
+                // The state can thus be swapped to EMPTY without issue.
+                // It could be tempting to use a store instead, but it would not
+                // work as it might overwrite a potential fetch_or and prevent
+                // the synchronization of a racing wake with the next register.
                 self.state.swap(EMPTY, SeqCst);
                 Some(waker)
             } else {
+                // Too bad, no waker was registered. It means, that a concurrent `register`
+                // might be concurrently storing a waker in cell 0 and swap the state with
+                // EMPTY. We still need to unset the WAKING flag, but we don't care if it
+                // fails, as it would mean the flag has been unset anyway.
+                // It is theoretically possible that WAKING flag has been already unset and
+                // that another thread has already set it back. In this case, either the
+                // state was not EMPTY and this CAS will fail, or the state was EMPTY and
+                // the other thread doesn't care as much as us about its CAS succeeding.
                 debug_assert_eq!(state, EMPTY);
                 let _ = (self.state).compare_exchange(WAKING | EMPTY, EMPTY, SeqCst, Relaxed);
                 None
             }
         } else {
+            // Load the state to check if there is a registered waker.
             let state = self.load_state();
             let waker_cell = self.wakers.get(state)?;
+            // Try swapping the state with WAKING. If it fails, it means either:
+            // - a concurrent `take` has won the race, so we can return
+            // - the waker was overwritten, so the registering thread is supposed
+            //   to check again its wakeup condition, so we can just return
             (self.state.compare_exchange(state, WAKING, SeqCst, Relaxed)).ok()?;
-            let waker = unsafe { waker_cell.get() };
+            // SAFETY: the state has been swapped, so a concurrent `overwrite` CAS
+            // will fail, and it is safe to access the cell to take its waker
+            let waker = unsafe { waker_cell.take() };
+            // The state can be reset to EMPTY with a simple store.
+            // (loom doesn't support SeqCst and uses RMW operation instead)
             if cfg!(loom) {
                 self.state.swap(EMPTY, SeqCst);
             } else {
