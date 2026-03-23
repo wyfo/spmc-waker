@@ -5,7 +5,7 @@
 //!
 //! # Features
 //!
-//! - `portable-atomic`: use `portable-atomic` crate to provides functionality to
+//! - `portable-atomic`: use `portable-atomic` crate to provide functionality to
 //!   targets without atomics.
 #![cfg_attr(not(loom), no_std)]
 use core::{hint::assert_unchecked, task::Waker};
@@ -82,7 +82,7 @@ const WAKING: usize = 4;
 /// `SpmcWaker` algorithm assumes a single thread calling `register`/`unregister`
 /// at a time. It is enforced by the methods' safety condition.
 ///
-/// This assumption allows significant optimizations compared to a MPMC algorithm
+/// This assumption allows significant optimizations compared to an MPMC algorithm
 /// like [`AtomicWaker`].
 ///
 /// # Memory ordering
@@ -105,9 +105,9 @@ const WAKING: usize = 4;
 /// For this reason, `SpmcWaker<false>` should be paired with a total order,
 /// for example atomic `SeqCst` or RMW operations. It ensures that checking
 /// the waking condition after `register` succeeds even when a concurrent
-/// `wake` miss the registered waker.
+/// `wake` misses the registered waker.
 ///
-/// It allows to optimize the algorithm even more, especially in the case
+/// It allows optimizing the algorithm even more, especially in the case
 /// where `wake` is called with no waker registered, as it becomes a single
 /// atomic load.
 ///
@@ -124,7 +124,6 @@ const WAKING: usize = 4;
 ///         atomic::{AtomicBool, Ordering::Relaxed},
 ///     },
 ///     task::Poll,
-///     thread,
 /// };
 ///
 /// use spmc_waker::SpmcWaker;
@@ -196,7 +195,6 @@ const WAKING: usize = 4;
 ///         },
 ///     },
 ///     task::Poll,
-///     thread,
 /// };
 ///
 /// use spmc_waker::SpmcWaker;
@@ -204,7 +202,7 @@ const WAKING: usize = 4;
 /// #[derive(Default)]
 /// struct Inner {
 ///     notified: AtomicBool,
-///     waker: SpmcWaker,
+///     waker: SpmcWaker<false>,
 /// }
 ///
 /// #[derive(Clone)]
@@ -381,7 +379,7 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
         let new_idx = (cur_idx + 1) % 2;
         // SAFETY: SeqCst protect against outdated read, and overwrite cannot be called
         // concurrently. It means that `take` can only access the cell at `cur_idx`, so
-        // the cell at `new_idx` is safe to access immutably.
+        // the cell at `new_idx` is safe to access mutably.
         unsafe { self.wakers[new_idx].set(waker) };
         // The cell index is attempted to be swapped with the new one just initialized.
         if let Err(state) = (self.state).compare_exchange(cur_idx, new_idx, SeqCst, SeqCst) {
@@ -415,7 +413,7 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
         if let Some(waker_cell) = self.wakers.get(state) {
             match self.state.compare_exchange(state, EMPTY, SeqCst, Relaxed) {
                 // SAFETY: state has been swapped to EMPTY, so the cell can
-                // no more be accessed by `take, and its waker can be taken
+                // no longer be accessed by `take`, and its waker can be taken
                 Ok(_) => return Some(unsafe { waker_cell.take() }),
                 Err(s) => debug_assert!(s >= 2),
             }
@@ -433,8 +431,8 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
     #[inline]
     pub fn take(&self) -> Option<Waker> {
         if SYNC {
-            // SYNC=true requires to do a Release write on the state, but we don't want
-            // to set the WAKING bit if there is no waker, as it would require to unset it.
+            // SYNC=true requires a Release write on the state, but we don't want to set
+            // the WAKING bit if there is no waker, as it would require unsetting it.
             // So we attempt a `fetch_add(0)` and hope for no concurrent `register`.
             if self.state.load(Relaxed) >= 2 && self.state.fetch_add(0, SeqCst) >= 2 {
                 return None;
@@ -451,7 +449,7 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
                 // The waker is taken before resetting the state.
                 let waker = unsafe { waker_cell.take() };
                 // At this point the only concurrent operation will be:
-                // - fetch_or(0), no issue
+                // - fetch_add(0), no issue
                 // - fetch_or(WAKING), another `take` is losing the race
                 // - CAS(new_idx, cur_idx), will fail because of WAKING flag
                 // The state can thus be swapped to EMPTY without issue.
@@ -461,7 +459,7 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
                 self.state.swap(EMPTY, SeqCst);
                 Some(waker)
             } else {
-                // Too bad, no waker was registered. It means, that a concurrent `register`
+                // Too bad, no waker was registered. It means that a concurrent `register`
                 // might be concurrently storing a waker in cell 0 and swap the state with
                 // EMPTY. We still need to unset the WAKING flag, but we don't care if it
                 // fails, as it would mean the flag has been unset anyway.
