@@ -8,6 +8,7 @@ use std::{
     thread,
 };
 
+use futures::executor::block_on;
 use spmc_waker::SpmcWaker;
 
 #[derive(Default)]
@@ -62,9 +63,8 @@ fn event() -> (Notifier, Waiter) {
     (waiter.notifier(), waiter)
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let (notifier, mut waiter) = event();
     thread::spawn(move || notifier.notify());
-    waiter.wait().await;
+    block_on(waiter.wait());
 }
