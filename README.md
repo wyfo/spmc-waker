@@ -96,6 +96,8 @@ Compared to `AtomicWaker`, `SpmcWaker` reduces the number of RMW operations for 
 
 As illustrated in the example, `SpmcWaker` is designed to be used in MPSC algorithms, i.e. one waiter registering its waker with multiple notifiers. In an MPSC channel case with some throughput, receiver waker is rarely registered, as there are more often already items waiting in the queue. However, receiver waker is systematically woken by producers, so optimizing `wake` when there is no waker registered becomes the most important. `SpmcWaker` algorithm was built with this goal in mind.
 
+As a concrete example, replacing `AtomicWaker` by `SpmcWaker<false>` in `tokio::sync::mpsc` improve tokio's benchmark up to 18%.
+
 ## Safety
 
 This crate uses unsafe code, as well as exposing unsafe methods. It is tested with both [`miri`](https://github.com/rust-lang/miri) and [`loom`](https://github.com/tokio-rs/loom), including tests adapted from `AtomicWaker`.
