@@ -61,4 +61,4 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: benchmark
-        run: cargo bench
+        run: cargo bench -- --min-time 1

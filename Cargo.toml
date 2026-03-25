@@ -31,6 +31,7 @@ divan = "0.1"
 
 [lib]
 test = false
+bench = false
 
 [[bench]]
 name = "comparison"
