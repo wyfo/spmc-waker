@@ -65,17 +65,6 @@ fn register_wake<W: AtomicWaker>(bencher: Bencher) {
 }
 
 #[divan::bench(types = [SpmcWaker<true, true>, SpmcWaker<false, true>, SpmcWaker<true, false>, SpmcWaker<false, false>, futures::task::AtomicWaker, DiatomicWaker])]
-fn register_spin_wake<W: AtomicWaker>(bencher: Bencher) {
-    let atomic_waker = W::default();
-    let waker = Waker::from(Arc::new(FakeWaker));
-    bencher.bench(|| {
-        unsafe { atomic_waker.register(&waker) };
-        spin_loop();
-        atomic_waker.wake();
-    });
-}
-
-#[divan::bench(types = [SpmcWaker<true, true>, SpmcWaker<false, true>, SpmcWaker<true, false>, SpmcWaker<false, false>, futures::task::AtomicWaker, DiatomicWaker])]
 fn register_overwrite<W: AtomicWaker>(bencher: Bencher) {
     let atomic_waker = W::default();
     let waker1 = Waker::from(Arc::new(FakeWaker));
