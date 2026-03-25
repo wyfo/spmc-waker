@@ -17,7 +17,8 @@ use std::{sync::atomic::AtomicUsize, thread};
 use futures::executor::block_on;
 #[cfg(loom)]
 use loom::{future::block_on, model, sync::atomic::AtomicUsize, thread};
-use spmc_waker::SpmcWaker;
+
+type SpmcWaker = spmc_waker::SpmcWaker<{ super::SYNC }, { super::CACHED }>;
 
 #[cfg(not(loom))]
 fn model(f: impl FnOnce()) {
@@ -47,7 +48,7 @@ fn exclusive_access() {
                 STOP.store(true, SeqCst);
             }
         }
-        let spmc = SpmcWaker::<{ super::SYNC }>::new();
+        let spmc = SpmcWaker::new();
         let waker = unsafe { Waker::from_raw(raw_waker()) };
         #[cfg(not(loom))]
         thread::scope(|s| {
@@ -95,7 +96,7 @@ impl Wake for CounterWaker {
     }
 }
 
-fn concurrent_try_register_and_wake(spmc: SpmcWaker<{ super::SYNC }>, arc: &Arc<CounterWaker>) {
+fn concurrent_register_and_wake(spmc: SpmcWaker, arc: &Arc<CounterWaker>) {
     let waker = Waker::from(arc.clone());
     #[cfg(not(loom))]
     thread::scope(|s| {
@@ -126,35 +127,36 @@ fn concurrent_try_register_and_wake(spmc: SpmcWaker<{ super::SYNC }>, arc: &Arc<
     let wake_count = arc.0.load(Relaxed);
     let waker_count = Arc::strong_count(arc);
     match (wake_count, waker_count) {
-        (1, 1) => {} // register called before wake or raced with it
-        (0, 2) => {} // register called after wake
+        (1, 2) if super::CACHED => {} // register called before wake
+        (1, 1) => {}                  // register called before wake or raced with it
+        (0, 2) => {}                  // register called after wake
         other => panic!("unexpected outcome: {other:?}"),
     }
 }
 
 #[test]
-fn concurrent_try_register_empty_and_wake() {
+fn concurrent_register_empty_and_wake() {
     model(|| {
-        let spmc = SpmcWaker::<{ super::SYNC }>::new();
+        let spmc = SpmcWaker::new();
         let arc = Arc::<CounterWaker>::default();
-        concurrent_try_register_and_wake(spmc, &arc);
+        concurrent_register_and_wake(spmc, &arc);
     });
 }
 
 #[test]
-fn concurrent_try_register_overwrite_and_wake() {
+fn concurrent_register_overwrite_and_wake() {
     model(|| {
-        let spmc = SpmcWaker::<{ super::SYNC }>::new();
+        let spmc = SpmcWaker::new();
         let arc = Arc::<CounterWaker>::default();
-        unsafe { spmc.register(Waker::from(Arc::<CounterWaker>::default())) };
-        concurrent_try_register_and_wake(spmc, &arc);
+        unsafe { spmc.register(Waker::noop()) };
+        concurrent_register_and_wake(spmc, &arc);
     });
 }
 
 #[test]
 fn concurrent_unregister_and_wake() {
     model(|| {
-        let spmc = SpmcWaker::<{ super::SYNC }>::new();
+        let spmc = SpmcWaker::new();
         let arc = Arc::<CounterWaker>::default();
         let waker = Waker::from(arc.clone());
         unsafe { spmc.register(waker) };
@@ -184,8 +186,10 @@ fn concurrent_unregister_and_wake() {
             wake2.join().unwrap();
             register.join().unwrap()
         };
+        let waker_count = Arc::strong_count(&arc);
+        assert_eq!(waker_count, if super::CACHED { 2 } else { 1 });
         let wake_count = arc.0.load(Relaxed);
-        match (unregistered.is_some(), wake_count) {
+        match (unregistered, wake_count) {
             (true, 0) => {}  // unregister called before wake
             (false, 1) => {} // unregister raced with wake or called after it
             other => panic!("unexpected outcome: {other:?}"),
@@ -198,7 +202,7 @@ fn concurrent_unregister_and_wake() {
 #[test]
 fn basic() {
     let ordering = if super::SYNC { Relaxed } else { SeqCst };
-    let atomic_waker = Arc::new(SpmcWaker::<{ super::SYNC }>::new());
+    let atomic_waker = Arc::new(SpmcWaker::new());
     let atomic_waker_copy = atomic_waker.clone();
 
     let returned_pending = Arc::new(AtomicUsize::new(0));
@@ -242,7 +246,7 @@ fn basic() {
 fn basic_notification() {
     struct Chan {
         num: AtomicUsize,
-        task: SpmcWaker<{ super::SYNC }>,
+        task: SpmcWaker,
     }
 
     const NUM_NOTIFY: usize = 2;
@@ -252,7 +256,7 @@ fn basic_notification() {
     model(|| {
         let chan = Arc::new(Chan {
             num: AtomicUsize::new(0),
-            task: SpmcWaker::<{ super::SYNC }>::new(),
+            task: SpmcWaker::new(),
         });
 
         for _ in 0..NUM_NOTIFY {
