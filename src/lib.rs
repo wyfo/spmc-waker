@@ -90,13 +90,13 @@ const WAKING: usize = 4;
 /// `SpmcWaker` has a generic `SYNC` parameter which determines the
 /// synchronization guarantees.
 ///
-/// ## `SYNC=true` (the default)
+/// ### `SYNC=true` (the default)
 ///
 /// Calling `register` "acquires" all memory "released" by calls to `wake`
 /// before the call to `register`. Later calls to `wake` will wake the
 /// registered waker (on contention this wake might be triggered in `register`).
 ///
-/// ## `SYNC=false`
+/// ### `SYNC=false`
 ///
 /// This is a more advanced configuration, where there is no acquire-release
 /// synchronization between `register` and `wake`. A `wake` call may not see
@@ -110,6 +110,24 @@ const WAKING: usize = 4;
 /// It allows optimizing the algorithm even more, especially in the case
 /// where `wake` is called with no waker registered, as it becomes a single
 /// atomic load.
+///
+/// # Waker caching
+///
+/// Most of the time, `SpmcWaker` is used in a single task, so the waker
+/// registered is always the same. That's why it provides a second generic
+/// parameter `CACHED`.
+///
+/// ### `CACHED=true` (the default)
+///
+/// The last waker registered is kept cached to avoid cloning it at the next
+/// registration. As a consequence, waking is done with [`Waker::wake_by_ref`].
+/// As wakers are often `Arc`s, caching avoids atomic RMW operations updating
+/// the reference counter.
+///
+/// ### `CACHED=false`
+///
+/// Waker is cloned when registered by reference, and the task are wakened with
+/// [`Waker::wake`].
 ///
 /// # Examples
 ///
@@ -261,8 +279,9 @@ pub struct SpmcWaker<const SYNC: bool = true, const CACHED: bool = true> {
     /// State possible values are:
     /// - 0 or 1: A waker is registered in `wakers[state]`
     /// - EMPTY: there is no waker registered
-    ///   with CACHED=true, it becomes a bit-flag
-    /// - WAKING: a `wake`/`take` operation is ongoing;
+    ///   with CACHED=true, it becomes a bit-flag and the LSB gives
+    ///   the cached waker index (cells are initialized with dummy wakers)
+    /// - WAKING: a `wake` operation is ongoing;
     ///   with SYNC=true, it becomes a bit-flag
     state: AtomicUsize,
     #[cfg(all(debug_assertions, not(loom)))]
@@ -330,13 +349,13 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         // State is loaded and expected to be EMPTY. Otherwise, it means
         // there already is a registered waker that needs to be overwritten.
         let state = self.load_state();
+        // The case `CACHED && state == EMPTY | 1` is handled in `overwrite`.
         if state == EMPTY {
             // SAFETY: SeqCst protect against outdated read, and `register`
             // cannot be called concurrently. It means that reading EMPTY
             // ensures there cannot be any registered waker at this point.
-            // A concurrent `take` will thus not attempt any read, so it's
-            // safe to access the cell mutably.
-            // TODO both cells can be accessed mutably
+            // A concurrent `wake` will thus not attempt any read, so it's
+            // safe to access both cells mutably.
             unsafe {
                 if !CACHED {
                     self.wakers[0].set(waker);
@@ -358,9 +377,8 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
 
     // Overwriting a registered waker is expected to be rare, hence the `#[cold]` attribute.
     #[cold]
-    #[inline(never)]
     fn overwrite(&self, waker: impl WakerRef, state: usize) {
-        // A concurrent `take` may be happening.
+        // A concurrent `wake` may be happening.
         if (SYNC && state & WAKING != 0) || (!SYNC && state == WAKING) {
             // A thread is currently waking the registered waker, so we can
             // assume we should not wait and return immediately.
@@ -377,21 +395,28 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
             ::loom::hint::spin_loop();
             return;
         }
-        // TODO
+        // We voluntarily don't handle `state & EMPTY != 0` in `register` and
+        // only handle index 0 instead to avoid dependency on the state when
+        // computing `self.wakers[0].will_wake(&waker)`, allowing speculative
+        // execution.
         if CACHED && state & EMPTY != 0 {
             // SAFETY: same as in `register`
             unsafe {
                 if state == EMPTY {
+                    // State is `EMPTY | 0`, but the cached waker needs to be overwritten.
                     self.wakers[0].drop();
                     self.wakers[0].set(waker);
                 } else if self.wakers[1].will_wake(&waker) {
+                    // If the cached waker at index 1 matches, it its moved to
+                    // index 0 to optimize future `register`.
                     self.wakers[0].set(ManuallyDrop::into_inner(self.wakers[1].get()));
                 } else {
+                    // Otherwise, overwrite the cached waker but at index 0.
                     self.wakers[1].drop();
                     self.wakers[0].set(waker);
                 }
             }
-            // same as in `register
+            // same as in `register`
             if SYNC || cfg!(loom) {
                 self.state.swap(0, SeqCst);
             } else {
@@ -403,19 +428,19 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         // SAFETY: state is not EMPTY nor WAKING, so it must be the cell index
         // of a registered waker.
         unsafe { assert_unchecked(cur_idx < 2) };
-        // SAFETY: `overwrite` cannot be called concurrently, but `take` could. However,
+        // SAFETY: `overwrite` cannot be called concurrently, but `wake` could. However,
         // both access the cell immutably, so it is safe.
         if unsafe { self.wakers[cur_idx].will_wake(&waker) } {
             return;
         }
         let new_idx = (cur_idx + 1) % 2;
-        // SAFETY: SeqCst protect against outdated read, and overwrite cannot be called
-        // concurrently. It means that `take` can only access the cell at `cur_idx`, so
+        // SAFETY: SeqCst protect against outdated read, and `overwrite` cannot be called
+        // concurrently. It means that `wake` can only access the cell at `cur_idx`, so
         // the cell at `new_idx` is safe to access mutably.
         unsafe { self.wakers[new_idx].set(waker) };
         // The cell index is attempted to be swapped with the new one just initialized.
         if let Err(state) = (self.state).compare_exchange(cur_idx, new_idx, SeqCst, SeqCst) {
-            // State update failed, which means a concurrent `take` was happening.
+            // State update failed, which means a concurrent `wake` was happening.
             // For the same reason as above, the task is rescheduled.
             debug_assert!(state >= 2);
             // SAFETY: state has not been updated, so `new_idx` cell is still safe
@@ -423,7 +448,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
             unsafe { ManuallyDrop::into_inner(self.wakers[new_idx].get()).wake() }
         } else {
             // SAFETY: cell index has been successfully swapped, so the cell
-            // at `cur_idx` is now safe to access to take its waker.
+            // at `cur_idx` is now safe to access to drop its waker.
             unsafe { self.wakers[cur_idx].drop() };
         }
     }
@@ -447,7 +472,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
             let res = self.state.compare_exchange(state, empty, SeqCst, Relaxed);
             match res {
                 // SAFETY: state has been swapped to EMPTY, so the cell can
-                // no longer be accessed by `take`, and its waker can be taken
+                // no longer be accessed by `wake`, and its waker can be taken
                 Ok(_) if !CACHED => unsafe { waker_cell.drop() },
                 Ok(_) => {}
                 Err(s) => debug_assert!(s >= 2),
@@ -467,7 +492,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
             }
             // There should be a waker registered, set the WAKING bit.
             let state = self.state.fetch_or(WAKING, SeqCst);
-            // A concurrent `take` has won the race, just return.
+            // A concurrent `wake` has won the race, just return.
             if state & WAKING != 0 {
                 return None;
             }
@@ -478,7 +503,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
                 let waker = unsafe { waker_cell.get() };
                 // At this point the only concurrent operation will be:
                 // - fetch_add(0), no issue
-                // - fetch_or(WAKING), another `take` is losing the race
+                // - fetch_or(WAKING), another `wake` is losing the race
                 // - CAS(new_idx, cur_idx), will fail because of WAKING flag
                 // The state can thus be swapped to EMPTY without issue.
                 // It could be tempting to use a store instead, but it would not
@@ -505,7 +530,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
             let state = self.load_state();
             let waker_cell = self.wakers.get(state)?;
             // Try swapping the state with WAKING. If it fails, it means either:
-            // - a concurrent `take` has won the race, so we can return
+            // - a concurrent `wake` has won the race, so we can return
             // - the waker was overwritten, so the registering thread is supposed
             //   to check again its wakeup condition, so we can just return
             (self.state.compare_exchange(state, WAKING, SeqCst, Relaxed)).ok()?;
