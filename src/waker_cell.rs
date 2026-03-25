@@ -1,6 +1,7 @@
 use core::{
-    mem::{ManuallyDrop, MaybeUninit},
-    task::{RawWakerVTable, Waker},
+    mem::ManuallyDrop,
+    ptr,
+    task::{RawWaker, RawWakerVTable, Waker},
 };
 
 use crate::{
@@ -8,20 +9,27 @@ use crate::{
     loom::{UnsafeCell, UnsafeCellExt},
 };
 
-/// A sort of `UnsafeCell<MaybeUninit<Waker>>`. Because waker cell can be accessed to call
+static NOOP_VTABLE: &RawWakerVTable = &RawWakerVTable::new(
+    |_| RawWaker::new(ptr::null(), NOOP_VTABLE),
+    |_| (),
+    |_| (),
+    |_| (),
+);
+
+/// A sort of `UnsafeCell<Waker>`. Because waker cell can be accessed to call
 /// `will_wake` while a concurrent thread is waking the waker by value, storing `Waker`
 /// directly would mean to rely on its internal behavior of being copy-safe.
 ///
 /// Instead, we store `Waker` components, which are copy-safe, and use our own
-/// `will_wake`. Even if miri was not complaining with `UnsafeCell<MaybeUninit<Waker>>`,
+/// `will_wake`. Even if miri was not complaining with `UnsafeCell<Waker>`,
 /// it still helps to simplify `SpmcWaker` code a bit.
 #[derive(Debug)]
-pub(super) struct WakerCell(UnsafeCell<MaybeUninit<(*const (), &'static RawWakerVTable)>>);
+pub(super) struct WakerCell(UnsafeCell<(*const (), &'static RawWakerVTable)>);
 
 impl WakerCell {
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     pub(super) const fn new() -> Self {
-        Self(UnsafeCell::new(MaybeUninit::uninit()))
+        Self(UnsafeCell::new((ptr::null(), NOOP_VTABLE)))
     }
 
     /// # Safety
@@ -31,37 +39,39 @@ impl WakerCell {
         let waker = ManuallyDrop::new(waker.into_waker());
         // SAFETY: as per function contract
         unsafe {
-            self.0.with_ref_mut(|cell| {
-                cell.write((waker.data(), waker.vtable()));
-            });
-        };
+            self.0
+                .with_ref_mut(|cell| *cell = (waker.data(), waker.vtable()));
+        }
     }
 
     /// # Safety
     ///
-    /// The cell must be safe to access immutably, and waker must have been set.
+    /// The cell must be safe to access immutably.
     pub(super) unsafe fn will_wake(&self, waker: &impl WakerRef) -> bool {
         let waker = waker.as_waker();
         // SAFETY: as per function contract
         unsafe {
-            self.0.with_ref(|cell| {
-                let (data, vtable) = cell.assume_init_read();
-                waker.data() == data && waker.vtable() == vtable
-            })
+            self.0
+                .with_ref(|&(data, vtable)| data == waker.data() && ptr::eq(waker.vtable(), vtable))
         }
     }
 
     /// # Safety
     ///
-    /// The cell must be safe to access immutably, waker must have been set
-    /// and the method must be called exactly once before a new `set` call.
-    pub(super) unsafe fn take(&self) -> Waker {
+    /// The cell must be safe to access immutably.
+    pub(super) unsafe fn get(&self) -> ManuallyDrop<Waker> {
         // SAFETY: as per function contract
-        unsafe {
-            self.0.with_ref(|cell| {
-                let (data, vtable) = cell.assume_init_read();
-                Waker::new(data, vtable)
-            })
-        }
+        unsafe { ManuallyDrop::new(self.0.with_ref(|&(data, vtable)| Waker::new(data, vtable))) }
+    }
+
+    /// # Safety
+    ///
+    /// The cell must be safe to access mutably.
+    pub(super) unsafe fn drop(&self) {
+        // In fact, mutable access is not needed, but it is done as an additional check.
+        // SAFETY: as per function contract
+        unsafe { self.0.with_ref_mut(|_| ()) };
+        // SAFETY: as per function contract
+        drop(ManuallyDrop::into_inner(unsafe { self.get() }));
     }
 }

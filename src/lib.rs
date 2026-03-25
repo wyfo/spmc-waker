@@ -8,7 +8,7 @@
 //! - `portable-atomic`: use `portable-atomic` crate to provide functionality to
 //!   targets without atomics.
 #![cfg_attr(not(loom), no_std)]
-use core::{hint::assert_unchecked, task::Waker};
+use core::{hint::assert_unchecked, mem::ManuallyDrop, task::Waker};
 
 use crate::{
     loom::{
@@ -256,11 +256,12 @@ const WAKING: usize = 4;
 ///
 /// [`AtomicWaker`]: https://docs.rs/futures/latest/futures/task/struct.AtomicWaker.html
 #[derive(Debug)]
-pub struct SpmcWaker<const SYNC: bool = true> {
+pub struct SpmcWaker<const SYNC: bool = true, const CACHED: bool = true> {
     wakers: [WakerCell; 2],
     /// State possible values are:
     /// - 0 or 1: A waker is registered in `wakers[state]`
     /// - EMPTY: there is no waker registered
+    ///   with CACHED=true, it becomes a bit-flag
     /// - WAKING: a `wake`/`take` operation is ongoing;
     ///   with SYNC=true, it becomes a bit-flag
     state: AtomicUsize,
@@ -268,21 +269,22 @@ pub struct SpmcWaker<const SYNC: bool = true> {
     exclusive: exclusive::Exclusive,
 }
 
-unsafe impl<const SYNC: bool> Send for SpmcWaker<SYNC> {}
-unsafe impl<const SYNC: bool> Sync for SpmcWaker<SYNC> {}
+unsafe impl<const SYNC: bool, const CACHED: bool> Send for SpmcWaker<SYNC, CACHED> {}
+unsafe impl<const SYNC: bool, const CACHED: bool> Sync for SpmcWaker<SYNC, CACHED> {}
 
-impl<const SYNC: bool> Drop for SpmcWaker<SYNC> {
+impl<const SYNC: bool, const CACHED: bool> Drop for SpmcWaker<SYNC, CACHED> {
     #[inline]
     fn drop(&mut self) {
-        if let Some(waker) = self.wakers.get(self.state.load_mut()) {
+        let state = self.state.load_mut();
+        if CACHED || state < 2 {
             // SAFETY: state is the index of a waker currently registered
             // that must be taken back, and access is safe in destructor
-            unsafe { drop(waker.take()) };
+            unsafe { self.wakers[state % 2].drop() };
         }
     }
 }
 
-impl<const SYNC: bool> SpmcWaker<SYNC> {
+impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
     /// Creates a new `SpmcWaker`.
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[inline]
@@ -334,7 +336,14 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
             // ensures there cannot be any registered waker at this point.
             // A concurrent `take` will thus not attempt any read, so it's
             // safe to access the cell mutably.
-            unsafe { self.wakers[0].set(waker) };
+            // TODO both cells can be accessed mutably
+            unsafe {
+                if !CACHED {
+                    self.wakers[0].set(waker);
+                } else if !self.wakers[0].will_wake(&waker) {
+                    return self.overwrite(waker, state);
+                }
+            }
             // SYNC=true uses swap, as `wake` must synchronize with `register`
             // (loom doesn't support SeqCst and uses RMW operation instead)
             if SYNC || cfg!(loom) {
@@ -349,6 +358,7 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
 
     // Overwriting a registered waker is expected to be rare, hence the `#[cold]` attribute.
     #[cold]
+    #[inline(never)]
     fn overwrite(&self, waker: impl WakerRef, state: usize) {
         // A concurrent `take` may be happening.
         if (SYNC && state & WAKING != 0) || (!SYNC && state == WAKING) {
@@ -365,6 +375,28 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
             // already do the job of `spin_loop`.
             #[cfg(loom)]
             ::loom::hint::spin_loop();
+            return;
+        }
+        // TODO
+        if CACHED && state & EMPTY != 0 {
+            // SAFETY: same as in `register`
+            unsafe {
+                if state == EMPTY {
+                    self.wakers[0].drop();
+                    self.wakers[0].set(waker);
+                } else if self.wakers[1].will_wake(&waker) {
+                    self.wakers[0].set(ManuallyDrop::into_inner(self.wakers[1].get()));
+                } else {
+                    self.wakers[1].drop();
+                    self.wakers[0].set(waker);
+                }
+            }
+            // same as in `register
+            if SYNC || cfg!(loom) {
+                self.state.swap(0, SeqCst);
+            } else {
+                self.state.store(0, SeqCst);
+            }
             return;
         }
         let cur_idx = state;
@@ -388,11 +420,11 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
             debug_assert!(state >= 2);
             // SAFETY: state has not been updated, so `new_idx` cell is still safe
             // to access, and the waker previously set can be taken back.
-            unsafe { self.wakers[new_idx].take().wake() }
+            unsafe { ManuallyDrop::into_inner(self.wakers[new_idx].get()).wake() }
         } else {
             // SAFETY: cell index has been successfully swapped, so the cell
             // at `cur_idx` is now safe to access to take its waker.
-            unsafe { drop(self.wakers[cur_idx].take()) };
+            unsafe { self.wakers[cur_idx].drop() };
         }
     }
 
@@ -406,30 +438,26 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
     /// `register` and `unregister` methods must not be called concurrently
     /// from multiple threads.
     #[inline]
-    pub unsafe fn unregister(&self) -> Option<Waker> {
+    pub unsafe fn unregister(&self) -> bool {
         #[cfg(all(debug_assertions, not(loom)))]
         let _guard = self.exclusive.check();
         let state = self.load_state();
         if let Some(waker_cell) = self.wakers.get(state) {
-            match self.state.compare_exchange(state, EMPTY, SeqCst, Relaxed) {
+            let empty = if CACHED { state | EMPTY } else { EMPTY };
+            let res = self.state.compare_exchange(state, empty, SeqCst, Relaxed);
+            match res {
                 // SAFETY: state has been swapped to EMPTY, so the cell can
                 // no longer be accessed by `take`, and its waker can be taken
-                Ok(_) => return Some(unsafe { waker_cell.take() }),
+                Ok(_) if !CACHED => unsafe { waker_cell.drop() },
+                Ok(_) => {}
                 Err(s) => debug_assert!(s >= 2),
             }
+            return res.is_ok();
         }
-        None
+        false
     }
 
-    /// Returns the last `Waker` passed to `register`, so that the caller can wake it.
-    ///
-    /// Sometimes, just waking the `SpmcWaker` is not fine grained enough. This allows the caller
-    /// to take the waker and then wake it separately, rather than performing both steps in one
-    /// atomic action.
-    ///
-    /// If a waker has not been registered, this returns `None`.
-    #[inline]
-    pub fn take(&self) -> Option<Waker> {
+    pub fn wake_impl(&self) -> Option<ManuallyDrop<Waker>> {
         if SYNC {
             // SYNC=true requires a Release write on the state, but we don't want to set
             // the WAKING bit if there is no waker, as it would require unsetting it.
@@ -447,7 +475,7 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
                 // SAFETY: the state is locked on WAKING, the cell can be concurrently
                 // accessed with `will_wake`, but it can still be accessed immutably.
                 // The waker is taken before resetting the state.
-                let waker = unsafe { waker_cell.take() };
+                let waker = unsafe { waker_cell.get() };
                 // At this point the only concurrent operation will be:
                 // - fetch_add(0), no issue
                 // - fetch_or(WAKING), another `take` is losing the race
@@ -456,7 +484,8 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
                 // It could be tempting to use a store instead, but it would not
                 // work as it might overwrite a potential fetch_or and prevent
                 // the synchronization of a racing wake with the next register.
-                self.state.swap(EMPTY, SeqCst);
+                let empty = if CACHED { state | EMPTY } else { EMPTY };
+                self.state.swap(empty, SeqCst);
                 Some(waker)
             } else {
                 // Too bad, no waker was registered. It means that a concurrent `register`
@@ -467,8 +496,8 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
                 // that another thread has already set it back. In this case, either the
                 // state was not EMPTY and this CAS will fail, or the state was EMPTY and
                 // the other thread doesn't care as much as us about its CAS succeeding.
-                debug_assert_eq!(state, EMPTY);
-                let _ = (self.state).compare_exchange(WAKING | EMPTY, EMPTY, SeqCst, Relaxed);
+                debug_assert!((CACHED && state & EMPTY != 0) || (!CACHED && state == EMPTY));
+                let _ = (self.state).compare_exchange(state | WAKING, state, SeqCst, Relaxed);
                 None
             }
         } else {
@@ -482,13 +511,14 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
             (self.state.compare_exchange(state, WAKING, SeqCst, Relaxed)).ok()?;
             // SAFETY: the state has been swapped, so a concurrent `overwrite` CAS
             // will fail, and it is safe to access the cell to take its waker
-            let waker = unsafe { waker_cell.take() };
+            let waker = unsafe { waker_cell.get() };
             // The state can be reset to EMPTY with a simple store.
             // (loom doesn't support SeqCst and uses RMW operation instead)
+            let empty = if CACHED { state | EMPTY } else { EMPTY };
             if cfg!(loom) {
-                self.state.swap(EMPTY, SeqCst);
+                self.state.swap(empty, SeqCst);
             } else {
-                self.state.store(EMPTY, SeqCst);
+                self.state.store(empty, SeqCst);
             }
             Some(waker)
         }
@@ -499,14 +529,37 @@ impl<const SYNC: bool> SpmcWaker<SYNC> {
     /// If `register` has not been called yet, then this does nothing.
     #[inline]
     pub fn wake(&self) {
-        if let Some(waker) = self.take() {
-            waker.wake();
+        if let Some(waker) = self.wake_impl() {
+            if CACHED {
+                waker.wake_by_ref();
+            } else {
+                ManuallyDrop::into_inner(waker).wake();
+            }
         }
     }
 }
 
-impl<const SYNC: bool> Default for SpmcWaker<SYNC> {
+impl<const SYNC: bool> SpmcWaker<SYNC, false> {
+    /// Returns the last `Waker` passed to `register`, so that the caller can wake it.
+    ///
+    /// Sometimes, just waking the `SpmcWaker` is not fine-grained enough. This allows the caller
+    /// to take the waker and then wake it separately, rather than performing both steps in one
+    /// atomic action.
+    ///
+    /// If a waker has not been registered, this returns `None`.
+    pub fn take(&self) -> Option<Waker> {
+        self.wake_impl().map(ManuallyDrop::into_inner)
+    }
+}
+
+impl<const SYNC: bool, const CACHED: bool> Default for SpmcWaker<SYNC, CACHED> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[unsafe(no_mangle)]
+fn plop(a: &SpmcWaker<false>, w: &Waker) {
+    unsafe { a.register(w) }
+    // a.wake();
 }

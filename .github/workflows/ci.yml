@@ -31,9 +31,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: loom
-        run: cargo test --test sync --test unsync --release
+        run: cargo test --tests --release
         env:
-          RUSTFLAGS: --cfg loom
+          RUSTFLAGS: "--cfg loom -C debug_assertions"
           LOOM_MAX_PREEMPTIONS: 2
 
   miri:
@@ -48,6 +48,6 @@ jobs:
       - name: install miri
         run: rustup install nightly && rustup +nightly component add miri
       - name: miri
-        run: cargo +nightly miri test --test sync --test unsync
+        run: cargo +nightly miri test --tests
         env:
           MIRIFLAGS: -Zmiri-many-seeds=${{ matrix.seeds }} -Zmiri-compare-exchange-weak-failure-rate=0
