@@ -46,6 +46,15 @@ impl Wake for FakeWaker {
 }
 
 #[divan::bench(types = [SpmcWaker<true, true>, SpmcWaker<false, true>, SpmcWaker<true, false>, SpmcWaker<false, false>, futures::task::AtomicWaker, DiatomicWaker])]
+fn register<W: AtomicWaker>(bencher: Bencher) {
+    let atomic_waker = W::default();
+    let waker = Waker::from(Arc::new(FakeWaker));
+    bencher.bench(|| {
+        unsafe { atomic_waker.register(&waker) };
+    });
+}
+
+#[divan::bench(types = [SpmcWaker<true, true>, SpmcWaker<false, true>, SpmcWaker<true, false>, SpmcWaker<false, false>, futures::task::AtomicWaker, DiatomicWaker])]
 fn register_wake<W: AtomicWaker>(bencher: Bencher) {
     let atomic_waker = W::default();
     let waker = Waker::from(Arc::new(FakeWaker));
