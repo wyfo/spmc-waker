@@ -126,7 +126,7 @@ const WAKING: usize = 4;
 ///
 /// ### `CACHED=false`
 ///
-/// Waker is cloned when registered by reference, and the task are wakened with
+/// Waker is cloned when registered by reference, and the tasks are woken with
 /// [`Waker::wake`].
 ///
 /// # Examples
@@ -279,7 +279,7 @@ pub struct SpmcWaker<const SYNC: bool = true, const CACHED: bool = true> {
     /// State possible values are:
     /// - 0 or 1: A waker is registered in `wakers[state]`
     /// - EMPTY: there is no waker registered
-    ///   with CACHED=true, it becomes a bit-flag and the LSB gives
+    ///   with CACHED=true, it becomes a bit-flag and the state's LSB gives
     ///   the cached waker index (cells are initialized with dummy wakers)
     /// - WAKING: a `wake` operation is ongoing;
     ///   with SYNC=true, it becomes a bit-flag
@@ -407,11 +407,12 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
                     self.wakers[0].drop();
                     self.wakers[0].set(waker);
                 } else if self.wakers[1].will_wake(&waker) {
-                    // If the cached waker at index 1 matches, it its moved to
+                    // If the cached waker at index 1 matches, it is moved to
                     // index 0 to optimize future `register`.
                     self.wakers[0].set(ManuallyDrop::into_inner(self.wakers[1].get()));
                 } else {
-                    // Otherwise, overwrite the cached waker but at index 0.
+                    // Otherwise, overwrite the cached waker, writing the new
+                    // one at index 0 to optimize future `register`.
                     self.wakers[1].drop();
                     self.wakers[0].set(waker);
                 }
@@ -453,7 +454,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         }
     }
 
-    /// Removes the registered waker, returning it without waking it.
+    /// Removes the registered waker if there is one, returning `true` in this case.
     ///
     /// It allows avoiding spurious wakeups when a waker has been registered,
     /// but the wake condition is already met.
@@ -482,7 +483,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         false
     }
 
-    pub fn wake_impl(&self) -> Option<ManuallyDrop<Waker>> {
+    fn wake_impl(&self) -> Option<ManuallyDrop<Waker>> {
         if SYNC {
             // SYNC=true requires a Release write on the state, but we don't want to set
             // the WAKING bit if there is no waker, as it would require unsetting it.

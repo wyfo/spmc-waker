@@ -6,7 +6,7 @@ A synchronization primitive for task wakeup.
 
 - optimized for a single producer (the polled future registering its waker) and multiple consumers (threads calling `wake`)
 - opt out of acquire-release synchronization between `register` and `wake` for extra performance
-- Waker caching to save cloning/dropping when the waker is reused in a task 
+- Waker caching to save cloning/dropping when the waker is reused in a task
 
 ## Example
 
@@ -87,7 +87,7 @@ fn event() -> (Notifier, Waiter) {
 
 #### Waker caching
 
-`AtomicWaker` always clone the registered waker, and drop it with `Waker::wake`. However, most of the time, the waker registered is always the same, as there is a single task polling it. That's why `SpmcWaker` provides a second generic parameter `CACHED`. By default (`CACHED=true`), the registered waker is cached, i.e. it's not dropped when `SpmcWaker::wake` is called, using `Waker::wake_by_ref`.
+`AtomicWaker` always clones the registered waker, and drops it with `Waker::wake`. However, most of the time, the waker registered is always the same, as there is a single task polling it. That's why `SpmcWaker` provides a second generic parameter `CACHED`. By default (`CACHED=true`), the registered waker is cached, i.e. it's not dropped when `SpmcWaker::wake` is called, using `Waker::wake_by_ref`.
 So there is no need to clone it when the same waker is registered again. As wakers are often `Arc`s, caching avoids atomic RMW operations updating the reference counter.
 
 ## Performance
@@ -105,9 +105,9 @@ Compared to `AtomicWaker`, `SpmcWaker` reduces the number of RMW operations for 
 
 Atomic operations related to waker cloning/dropping are not counted in the table. As `SpmcWaker` caches the waker, these operations don't add overhead, but for `AtomicWaker`, an additional RMW(Relaxed) for `register`, as well as a RMW(Acquire) for `wake` (waker present) can be expected.
 
-As illustrated in the example, `SpmcWaker` is designed to be used in MPSC algorithms, i.e. one waiter registering its waker with multiple notifiers. In an MPSC channel case with some throughput, receiver waker is rarely registered, as there are more often already items waiting in the queue. However, receiver waker is systematically woken by producers, so optimizing `wake` when there is no waker registered becomes the most important. `SpmcWaker` algorithm was built with this goal in mind.
+As illustrated in the example, `SpmcWaker` is designed to be used in MPSC algorithms, i.e. one waiter registering its waker with multiple notifiers. In an MPSC channel case with some throughput, the receiver waker is rarely registered, as there are more often already items waiting in the queue. However, the receiver waker is systematically woken by producers, so optimizing `wake` when there is no waker registered becomes the most important. `SpmcWaker` algorithm was built with this goal in mind.
 
-As a concrete example, replacing `AtomicWaker` by `SpmcWaker<false>` in `tokio::sync::mpsc` improve tokio's benchmark up to 30%.
+As a concrete example, replacing `AtomicWaker` with `SpmcWaker<false>` in `tokio::sync::mpsc` improves tokio's benchmark up to 30%.
 
 ## Safety
 
