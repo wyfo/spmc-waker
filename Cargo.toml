@@ -1,5 +1,5 @@
 [package]
-name = "spmc_waker"
+name = "spmc-waker"
 version = "0.1.0"
 edition = "2024"
 homepage = "https://github.com/wyfo/spmc-waker"

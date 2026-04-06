@@ -56,7 +56,7 @@ impl AtomicUsizeExt for AtomicUsize {
 }
 
 #[cfg(loom)]
-impl AtomicUsizeExt for loom::sync::atomic::AtomicUsize {
+impl AtomicUsizeExt for AtomicUsize {
     #[track_caller]
     fn load_mut(&mut self) -> usize {
         self.with_mut(|v| *v)

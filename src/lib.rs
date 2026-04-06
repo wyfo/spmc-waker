@@ -7,7 +7,7 @@
 //!
 //! - `portable-atomic`: use `portable-atomic` crate to provide functionality to
 //!   targets without atomics.
-#![cfg_attr(not(loom), no_std)]
+#![no_std]
 use core::{hint::assert_unchecked, mem::ManuallyDrop, task::Waker};
 
 use crate::{
