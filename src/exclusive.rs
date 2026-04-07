@@ -1,4 +1,4 @@
-use crate::loom::{AtomicUsize, Ordering::Relaxed};
+use crate::loom::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
 #[derive(Debug)]
 pub(crate) struct Exclusive(AtomicUsize);

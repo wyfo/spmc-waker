@@ -12,8 +12,11 @@ use core::{hint::assert_unchecked, mem::ManuallyDrop, task::Waker};
 
 use crate::{
     loom::{
-        AtomicUsize, AtomicUsizeExt,
-        Ordering::{Relaxed, SeqCst},
+        AtomicUsizeExt,
+        sync::atomic::{
+            AtomicUsize,
+            Ordering::{Relaxed, SeqCst},
+        },
     },
     waker_cell::WakerCell,
 };

@@ -1,15 +1,14 @@
-#[cfg(all(not(loom), not(feature = "portable-atomic")))]
-pub(crate) use core::sync::atomic::AtomicUsize;
 #[cfg(not(loom))]
-pub(crate) use core::{cell::UnsafeCell, sync::atomic::Ordering};
+pub(crate) use core::*;
 
 #[cfg(loom)]
-pub(crate) use loom::{
-    cell::UnsafeCell,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+pub(crate) use loom::*;
 #[cfg(all(not(loom), feature = "portable-atomic"))]
-pub(crate) use portable_atomic::AtomicUsize;
+pub(crate) mod sync {
+    pub(crate) mod atomic {
+        pub(crate) use portable_atomic::*;
+    }
+}
 
 pub(crate) trait UnsafeCellExt<T> {
     /// # Safety
@@ -22,25 +21,20 @@ pub(crate) trait UnsafeCellExt<T> {
     unsafe fn with_ref_mut<R, F: FnOnce(&mut T) -> R>(&self, f: F) -> R;
 }
 
-#[cfg(not(loom))]
-impl<T> UnsafeCellExt<T> for UnsafeCell<T> {
+impl<T> UnsafeCellExt<T> for cell::UnsafeCell<T> {
+    #[cfg_attr(loom, track_caller)]
     unsafe fn with_ref<R, F: FnOnce(&T) -> R>(&self, f: F) -> R {
-        f(unsafe { &*self.get() })
+        #[cfg(not(loom))]
+        return f(unsafe { &*self.get() });
+        #[cfg(loom)]
+        return self.with(|ptr| f(unsafe { &*ptr }));
     }
+    #[cfg_attr(loom, track_caller)]
     unsafe fn with_ref_mut<R, F: FnOnce(&mut T) -> R>(&self, f: F) -> R {
-        f(unsafe { &mut *self.get() })
-    }
-}
-
-#[cfg(loom)]
-impl<T> UnsafeCellExt<T> for UnsafeCell<T> {
-    #[track_caller]
-    unsafe fn with_ref<R, F: FnOnce(&T) -> R>(&self, f: F) -> R {
-        self.with(|ptr| f(unsafe { &*ptr }))
-    }
-    #[track_caller]
-    unsafe fn with_ref_mut<R, F: FnOnce(&mut T) -> R>(&self, f: F) -> R {
-        self.with_mut(|ptr| f(unsafe { &mut *ptr }))
+        #[cfg(not(loom))]
+        return f(unsafe { &mut *self.get() });
+        #[cfg(loom)]
+        return self.with_mut(|ptr| f(unsafe { &mut *ptr }));
     }
 }
 
@@ -48,17 +42,12 @@ pub(crate) trait AtomicUsizeExt {
     fn load_mut(&mut self) -> usize;
 }
 
-#[cfg(not(loom))]
-impl AtomicUsizeExt for AtomicUsize {
+impl AtomicUsizeExt for sync::atomic::AtomicUsize {
+    #[cfg_attr(loom, track_caller)]
     fn load_mut(&mut self) -> usize {
-        *self.get_mut()
-    }
-}
-
-#[cfg(loom)]
-impl AtomicUsizeExt for AtomicUsize {
-    #[track_caller]
-    fn load_mut(&mut self) -> usize {
-        self.with_mut(|v| *v)
+        #[cfg(not(loom))]
+        return *self.get_mut();
+        #[cfg(loom)]
+        return self.with_mut(|v| *v);
     }
 }

@@ -6,7 +6,7 @@ use core::{
 
 use crate::{
     WakerRef,
-    loom::{UnsafeCell, UnsafeCellExt},
+    loom::{UnsafeCellExt, cell::UnsafeCell},
 };
 
 static NOOP_VTABLE: &RawWakerVTable = &RawWakerVTable::new(
