@@ -483,85 +483,141 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         false
     }
 
-    fn wake_impl(&self) -> Option<ManuallyDrop<Waker>> {
-        if SYNC {
-            // SYNC=true requires a Release write on the state, but we don't want to set
-            // the WAKING bit if there is no waker, as it would require unsetting it.
-            // So we attempt a `fetch_add(0)` and hope for no concurrent `register`.
-            if self.state.load(Relaxed) >= 2 && self.state.fetch_add(0, SeqCst) >= 2 {
-                return None;
-            }
-            // There should be a waker registered, set the WAKING bit.
-            let state = self.state.fetch_or(WAKING, SeqCst);
-            // A concurrent `wake` has won the race, just return.
-            if state & WAKING != 0 {
-                return None;
-            }
-            if let Some(waker_cell) = self.wakers.get(state) {
-                // SAFETY: the state is locked on WAKING, the cell can be concurrently
-                // accessed with `will_wake`, but it can still be accessed immutably.
-                // The waker is taken before resetting the state.
-                let waker = unsafe { waker_cell.get() };
-                // At this point the only concurrent operation will be:
-                // - fetch_add(0), no issue
-                // - fetch_or(WAKING), another `wake` is losing the race
-                // - CAS(new_idx, cur_idx), will fail because of WAKING flag
-                // The state can thus be swapped to EMPTY without issue.
-                // It could be tempting to use a store instead, but it would not
-                // work as it might overwrite a potential fetch_or and prevent
-                // the synchronization of a racing wake with the next register.
-                let empty = if CACHED { state | EMPTY } else { EMPTY };
-                self.state.swap(empty, SeqCst);
-                Some(waker)
-            } else {
-                // Too bad, no waker was registered. It means that a concurrent `register`
-                // might be concurrently storing a waker in cell 0 and swap the state with
-                // EMPTY. We still need to unset the WAKING flag, but we don't care if it
-                // fails, as it would mean the flag has been unset anyway.
-                // It is theoretically possible that WAKING flag has been already unset and
-                // that another thread has already set it back. In this case, either the
-                // state was not EMPTY and this CAS will fail, or the state was EMPTY and
-                // the other thread doesn't care as much as us about its CAS succeeding.
-                debug_assert!((CACHED && state & EMPTY != 0) || (!CACHED && state == EMPTY));
-                let _ = (self.state).compare_exchange(state | WAKING, state, SeqCst, Relaxed);
-                None
-            }
-        } else {
-            // Load the state to check if there is a registered waker.
-            let state = self.load_state();
-            let waker_cell = self.wakers.get(state)?;
-            // Try swapping the state with WAKING. If it fails, it means either:
-            // - a concurrent `wake` has won the race, so we can return
-            // - the waker was overwritten, so the registering thread is supposed
-            //   to check again its wakeup condition, so we can just return
-            (self.state.compare_exchange(state, WAKING, SeqCst, Relaxed)).ok()?;
-            // SAFETY: the state has been swapped, so a concurrent `overwrite` CAS
-            // will fail, and it is safe to access the cell to take its waker
-            let waker = unsafe { waker_cell.get() };
-            // The state can be reset to EMPTY with a simple store.
-            // (loom doesn't support SeqCst and uses RMW operation instead)
-            let empty = if CACHED { state | EMPTY } else { EMPTY };
-            if cfg!(loom) {
-                self.state.swap(empty, SeqCst);
-            } else {
-                self.state.store(empty, SeqCst);
-            }
-            Some(waker)
-        }
-    }
-
     /// Calls `wake` on the last `Waker` passed to `register`.
     ///
     /// If `register` has not been called yet, then this does nothing.
     #[inline]
     pub fn wake(&self) {
-        if let Some(waker) = self.wake_impl() {
-            if CACHED {
-                waker.wake_by_ref();
+        self.check_before_wake(false, Self::wake_waker);
+    }
+
+    /// Same as [`wake`](Self::wake), but with the waking path marked `#[cold]`.
+    ///
+    /// This allows the method to inline more effectively. Prefer this over
+    /// `wake` when waking is the uncommon case.
+    #[inline]
+    pub fn wake_cold(&self) {
+        self.check_before_wake(true, Self::wake_waker);
+    }
+
+    fn wake_waker(waker: Option<ManuallyDrop<Waker>>) {
+        match waker {
+            Some(w) if CACHED => w.wake_by_ref(),
+            Some(w) if !CACHED => ManuallyDrop::into_inner(w).wake(),
+            _ => {}
+        }
+    }
+
+    #[inline(always)]
+    fn check_before_wake<R>(
+        &self,
+        cold: bool,
+        wake: impl FnOnce(Option<ManuallyDrop<Waker>>) -> R,
+    ) -> R {
+        if SYNC {
+            if cold {
+                // SYNC=true requires a Release write on the state, but we don't want to set
+                // the WAKING bit if there is no waker, as it would require unsetting it.
+                // So we attempt a `fetch_add(0)` and hope for no concurrent `register`.
+                if self.state.load(Relaxed) >= 2 && self.state.fetch_add(0, SeqCst) >= 2 {
+                    return wake(None);
+                }
+                self.wake_sync_cold(wake)
             } else {
-                ManuallyDrop::into_inner(waker).wake();
+                self.wake_sync(wake)
+            }
+        } else {
+            // Load the state to check if there is a registered waker.
+            let state = self.load_state();
+            if state >= 2 {
+                wake(None)
+            } else if cold {
+                self.wake_unsync_cold(state, wake)
+            } else {
+                self.wake_unsync(state, wake)
             }
         }
+    }
+
+    fn wake_sync<R>(&self, wake: impl FnOnce(Option<ManuallyDrop<Waker>>) -> R) -> R {
+        // There might be a waker registered, set the WAKING bit.
+        let state = self.state.fetch_or(WAKING, SeqCst);
+        // A concurrent `wake` has won the race, just return.
+        if state & WAKING != 0 {
+            return wake(None);
+        }
+        if let Some(waker_cell) = self.wakers.get(state) {
+            // SAFETY: the state is locked on WAKING, the cell can be concurrently
+            // accessed with `will_wake`, but it can still be accessed immutably.
+            // The waker is taken before resetting the state.
+            let waker = unsafe { waker_cell.get() };
+            // At this point the only concurrent operation will be:
+            // - fetch_add(0), no issue
+            // - fetch_or(WAKING), another `wake` is losing the race
+            // - CAS(new_idx, cur_idx), will fail because of WAKING flag
+            // The state can thus be swapped to EMPTY without issue.
+            // It could be tempting to use a store instead, but it would not
+            // work as it might overwrite a potential fetch_or and prevent
+            // the synchronization of a racing wake with the next register.
+            let empty = if CACHED { state | EMPTY } else { EMPTY };
+            self.state.swap(empty, SeqCst);
+            wake(Some(waker))
+        } else {
+            // Too bad, no waker was registered. It means that a concurrent `register`
+            // might be concurrently storing a waker in cell 0 and swap the state with
+            // EMPTY. We still need to unset the WAKING flag, but we don't care if it
+            // fails, as it would mean the flag has been unset anyway.
+            // It is theoretically possible that WAKING flag has been already unset and
+            // that another thread has already set it back. In this case, either the
+            // state was not EMPTY and this CAS will fail, or the state was EMPTY and
+            // the other thread doesn't care as much as us about its CAS succeeding.
+            debug_assert!((CACHED && state & EMPTY != 0) || (!CACHED && state == EMPTY));
+            let _ = (self.state).compare_exchange(state | WAKING, state, SeqCst, Relaxed);
+            wake(None)
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn wake_sync_cold<R>(&self, wake: impl FnOnce(Option<ManuallyDrop<Waker>>) -> R) -> R {
+        self.wake_sync(wake)
+    }
+
+    fn wake_unsync<R>(
+        &self,
+        state: usize,
+        wake: impl FnOnce(Option<ManuallyDrop<Waker>>) -> R,
+    ) -> R {
+        unsafe { assert_unchecked(state < 2) };
+        // Try swapping the state with WAKING. If it fails, it means either:
+        // - a concurrent `wake` has won the race, so we can return
+        // - the waker was overwritten, so the registering thread is supposed
+        //   to check again its wakeup condition, so we can just return
+        if (self.state.compare_exchange(state, WAKING, SeqCst, Relaxed)).is_err() {
+            return wake(None);
+        };
+        // SAFETY: the state has been swapped, so a concurrent `overwrite` CAS
+        // will fail, and it is safe to access the cell to take its waker
+        let waker = unsafe { self.wakers[state].get() };
+        // The state can be reset to EMPTY with a simple store.
+        // (loom doesn't support SeqCst and uses RMW operation instead)
+        let empty = if CACHED { state | EMPTY } else { EMPTY };
+        if cfg!(loom) {
+            self.state.swap(empty, SeqCst);
+        } else {
+            self.state.store(empty, SeqCst);
+        }
+        wake(Some(waker))
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn wake_unsync_cold<R>(
+        &self,
+        state: usize,
+        wake: impl FnOnce(Option<ManuallyDrop<Waker>>) -> R,
+    ) -> R {
+        self.wake_unsync(state, wake)
     }
 }
 
@@ -574,7 +630,20 @@ impl<const SYNC: bool> SpmcWaker<SYNC, false> {
     ///
     /// If a waker has not been registered, this returns `None`.
     pub fn take(&self) -> Option<Waker> {
-        self.wake_impl().map(ManuallyDrop::into_inner)
+        self.check_before_wake(false, Self::take_waker)
+    }
+
+    /// Same as [`take`](Self::take), but with the taking path marked `#[cold]`.
+    ///
+    /// This allows the method to inline more effectively. Prefer this over
+    /// `take` when taking is the uncommon case.
+    #[inline]
+    pub fn take_cold(&self) -> Option<Waker> {
+        self.check_before_wake(true, Self::take_waker)
+    }
+
+    fn take_waker(waker: Option<ManuallyDrop<Waker>>) -> Option<Waker> {
+        waker.map(ManuallyDrop::into_inner)
     }
 }
 
