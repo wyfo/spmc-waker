@@ -319,15 +319,6 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         }
     }
 
-    fn load_state(&self) -> usize {
-        #[cfg(not(loom))]
-        return self.state.load(SeqCst);
-        // loom doesn't support SeqCst and uses RMW operation instead
-        // to emulate the total order.
-        #[cfg(loom)]
-        return self.state.fetch_add(0, SeqCst);
-    }
-
     /// Registers the waker to be notified on calls to `wake`.
     ///
     /// The new task will take place of any previous tasks that were registered
@@ -351,7 +342,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         let _guard = self.exclusive.check();
         // State is loaded and expected to be EMPTY. Otherwise, it means
         // there already is a registered waker that needs to be overwritten.
-        let state = self.load_state();
+        let state = self.state.load(SeqCst);
         // The case `CACHED && state == EMPTY | 1` is handled in `overwrite`.
         if state == EMPTY {
             // SAFETY: SeqCst protect against outdated read, and `register`
@@ -367,8 +358,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
                 }
             }
             // SYNC=true uses swap, as `wake` must synchronize with `register`
-            // (loom doesn't support SeqCst and uses RMW operation instead)
-            if SYNC || cfg!(loom) {
+            if SYNC {
                 self.state.swap(0, SeqCst);
             } else {
                 self.state.store(0, SeqCst);
@@ -421,7 +411,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
                 }
             }
             // same as in `register`
-            if SYNC || cfg!(loom) {
+            if SYNC {
                 self.state.swap(0, SeqCst);
             } else {
                 self.state.store(0, SeqCst);
@@ -470,7 +460,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
     pub unsafe fn unregister(&self) -> bool {
         #[cfg(all(debug_assertions, not(loom)))]
         let _guard = self.exclusive.check();
-        let state = self.load_state();
+        let state = self.state.load(SeqCst);
         if let Some(waker_cell) = self.wakers.get(state) {
             let empty = if CACHED { state | EMPTY } else { EMPTY };
             let res = self.state.compare_exchange(state, empty, SeqCst, Relaxed);
@@ -531,7 +521,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
             }
         } else {
             // Load the state to check if there is a registered waker.
-            let state = self.load_state();
+            let state = self.state.load(SeqCst);
             if state >= 2 {
                 wake(None)
             } else if cold {
@@ -605,11 +595,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         // The state can be reset to EMPTY with a simple store.
         // (loom doesn't support SeqCst and uses RMW operation instead)
         let empty = if CACHED { state | EMPTY } else { EMPTY };
-        if cfg!(loom) {
-            self.state.swap(empty, SeqCst);
-        } else {
-            self.state.store(empty, SeqCst);
-        }
+        self.state.store(empty, SeqCst);
         wake(Some(waker))
     }
 

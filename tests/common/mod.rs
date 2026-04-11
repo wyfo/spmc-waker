@@ -29,6 +29,10 @@ fn model(f: impl FnOnce()) {
 #[test]
 #[should_panic]
 fn exclusive_access() {
+    #[cfg(loom)] // loom is not able to detect the data race
+    if true {
+        panic!();
+    }
     model(|| {
         static STOP: AtomicBool = AtomicBool::new(false);
         fn noop(_: *const ()) {}

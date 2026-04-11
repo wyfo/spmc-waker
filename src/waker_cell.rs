@@ -29,6 +29,7 @@ pub(super) struct WakerCell(UnsafeCell<(*const (), &'static RawWakerVTable)>);
 impl WakerCell {
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     pub(super) const fn new() -> Self {
+        // `Waker::noop` cannot be used here because Waker accessors are not const
         Self(UnsafeCell::new((ptr::null(), NOOP_VTABLE)))
     }
 
