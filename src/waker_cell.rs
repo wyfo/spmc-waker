@@ -4,10 +4,7 @@ use core::{
     task::{RawWaker, RawWakerVTable, Waker},
 };
 
-use crate::{
-    WakerRef,
-    loom::{UnsafeCellExt, cell::UnsafeCell},
-};
+use crate::loom::{UnsafeCellExt, cell::UnsafeCell};
 
 static NOOP_VTABLE: &RawWakerVTable = &RawWakerVTable::new(
     |_| RawWaker::new(ptr::null(), NOOP_VTABLE),
@@ -36,8 +33,8 @@ impl WakerCell {
     /// # Safety
     ///
     /// The cell must be safe to access mutably.
-    pub(super) unsafe fn set(&self, waker: impl WakerRef) {
-        let waker = ManuallyDrop::new(waker.into_waker());
+    pub(super) unsafe fn set(&self, waker: Waker) {
+        let waker = ManuallyDrop::new(waker);
         // SAFETY: as per function contract
         unsafe {
             self.0
@@ -48,8 +45,7 @@ impl WakerCell {
     /// # Safety
     ///
     /// The cell must be safe to access immutably.
-    pub(super) unsafe fn will_wake(&self, waker: &impl WakerRef) -> bool {
-        let waker = waker.as_waker();
+    pub(super) unsafe fn will_wake(&self, waker: &Waker) -> bool {
         // SAFETY: as per function contract
         unsafe {
             self.0

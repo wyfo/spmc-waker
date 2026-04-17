@@ -94,6 +94,12 @@ fn exclusive_access() {
 #[derive(Default)]
 struct CounterWaker(AtomicUsize);
 
+impl CounterWaker {
+    fn waker(self: &Arc<Self>) -> Waker {
+        Waker::from(self.clone())
+    }
+}
+
 impl Wake for CounterWaker {
     fn wake(self: Arc<Self>) {
         self.0.fetch_add(1, Relaxed);
@@ -101,17 +107,18 @@ impl Wake for CounterWaker {
 }
 
 fn concurrent_register_and_wake(spmc: SpmcWaker, arc: &Arc<CounterWaker>) {
-    let waker = Waker::from(arc.clone());
     #[cfg(not(loom))]
-    thread::scope(|s| {
+    let registered = thread::scope(|s| {
         s.spawn(|| spmc.wake());
         s.spawn(|| spmc.wake());
-        s.spawn(|| unsafe { spmc.register(waker) });
+        s.spawn(|| unsafe { spmc.register(&arc.waker()) })
+            .join()
+            .unwrap()
     });
     #[cfg(loom)]
     let spmc = Arc::new(spmc);
     #[cfg(loom)]
-    {
+    let registered = {
         let wake1 = thread::spawn({
             let spmc = spmc.clone();
             move || spmc.wake()
@@ -122,18 +129,20 @@ fn concurrent_register_and_wake(spmc: SpmcWaker, arc: &Arc<CounterWaker>) {
         });
         let register = thread::spawn({
             let spmc = spmc.clone();
-            move || unsafe { spmc.register(waker) }
+            let arc = arc.clone();
+            move || unsafe { spmc.register(&arc.waker()) }
         });
         wake1.join().unwrap();
         wake2.join().unwrap();
-        register.join().unwrap();
-    }
+        register.join().unwrap()
+    };
+    let waker_count = Arc::strong_count(arc) - 1;
     let wake_count = arc.0.load(Relaxed);
-    let waker_count = Arc::strong_count(arc);
-    match (wake_count, waker_count) {
-        (1, 2) if super::CACHED => {} // register called before wake
-        (1, 1) => {}                  // register called before wake or raced with it
-        (0, 2) => {}                  // register called after wake
+    match (wake_count, waker_count, registered) {
+        (1, 1, true) if super::CACHED => {} // register called before wake
+        (1, 0, true) => {}                  // register called before wake
+        (0, 0, false) => {}                 // register raced with wake
+        (0, 1, true) => {}                  // register called after wake
         other => panic!("unexpected outcome: {other:?}"),
     }
 }
@@ -162,8 +171,7 @@ fn concurrent_unregister_and_wake() {
     model(|| {
         let spmc = SpmcWaker::new();
         let arc = Arc::<CounterWaker>::default();
-        let waker = Waker::from(arc.clone());
-        unsafe { spmc.register(waker) };
+        assert!(unsafe { spmc.register(&arc.waker()) });
         #[cfg(not(loom))]
         let unregistered = thread::scope(|s| {
             s.spawn(|| spmc.wake());
@@ -190,8 +198,8 @@ fn concurrent_unregister_and_wake() {
             wake2.join().unwrap();
             register.join().unwrap()
         };
-        let waker_count = Arc::strong_count(&arc);
-        assert_eq!(waker_count, if super::CACHED { 2 } else { 1 });
+        let waker_count = Arc::strong_count(&arc) - 1;
+        assert_eq!(waker_count, if super::CACHED { 1 } else { 0 });
         let wake_count = arc.0.load(Relaxed);
         match (unregistered, wake_count) {
             (true, 0) => {}  // unregister called before wake
@@ -225,9 +233,13 @@ fn basic() {
                 // Assert we return pending exactly once
                 assert_eq!(0, pending_count);
                 pending_count += 1;
-                unsafe { atomic_waker_copy.register(cx.waker()) };
+                let registered = unsafe { atomic_waker_copy.register(cx.waker()) };
 
                 returned_pending_copy.store(1, Relaxed);
+
+                if !registered {
+                    cx.waker().wake_by_ref();
+                }
 
                 Poll::Pending
             }
@@ -273,7 +285,7 @@ fn basic_notification() {
         }
 
         block_on(poll_fn(move |cx| {
-            unsafe { chan.task.register(cx.waker()) };
+            let registered = unsafe { chan.task.register(cx.waker()) };
 
             let n = if super::SYNC {
                 chan.num.load(Relaxed)
@@ -282,6 +294,10 @@ fn basic_notification() {
             };
             if NUM_NOTIFY == n {
                 return Poll::Ready(());
+            }
+
+            if !registered {
+                cx.waker().wake_by_ref();
             }
 
             Poll::Pending
