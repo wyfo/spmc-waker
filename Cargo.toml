@@ -23,9 +23,9 @@ portable-atomic = ["dep:portable-atomic"]
 
 [dependencies]
 portable-atomic = { version = "1", optional = true, default-features = false }
-diatomic-waker = "0.2.3"
 
 [dev-dependencies]
+diatomic-waker = "0.2.3"
 futures = "0.3.32"
 divan = "0.1"
 
