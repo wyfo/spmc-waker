@@ -8,6 +8,8 @@
 //! - `portable-atomic`: use `portable-atomic` crate to provide functionality to
 //!   targets without atomics.
 #![no_std]
+#[cfg(doc)]
+extern crate std;
 use core::{hint::assert_unchecked, mem::ManuallyDrop, task::Waker};
 
 use crate::{
@@ -100,7 +102,7 @@ const WAKING: usize = 4;
 ///
 /// # Examples
 ///
-/// Here is a simple example providing a `Flag` that can be signalled manually
+/// Here is a simple example providing a `Flag` that can be signaled manually
 /// when it is ready.
 ///
 /// ```rust
