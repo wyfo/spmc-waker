@@ -1,6 +1,6 @@
 [package]
 name = "spmc-waker"
-version = "0.1.0"
+version = "0.1.0-alpha"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/wyfo/spmc-waker"
@@ -17,6 +17,8 @@ categories = [
   "no-std",
 ]
 repository = "https://github.com/wyfo/spmc-waker"
+description = "A cached SPMC atomic waker."
+rust-version = "1.85"
 
 [features]
 portable-atomic = ["dep:portable-atomic"]
