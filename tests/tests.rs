@@ -17,8 +17,12 @@ use std::{sync::atomic::AtomicUsize, thread};
 use futures::executor::block_on;
 #[cfg(loom)]
 use loom::{future::block_on, model, sync::atomic::AtomicUsize, thread};
+use rstest::rstest;
+use spmc_waker::SpmcWaker;
 
-type SpmcWaker = spmc_waker::SpmcWaker<{ super::SYNC }, { super::CACHED }>;
+struct Bool<const BOOL: bool>;
+const TRUE: Bool<true> = Bool::<true>;
+const FALSE: Bool<false> = Bool::<false>;
 
 #[cfg(not(loom))]
 fn model(f: impl FnOnce()) {
@@ -52,7 +56,7 @@ fn exclusive_access() {
                 STOP.store(true, SeqCst);
             }
         }
-        let spmc = SpmcWaker::new();
+        let spmc = <SpmcWaker>::new();
         let waker = unsafe { Waker::from_raw(raw_waker()) };
         #[cfg(not(loom))]
         thread::scope(|s| {
@@ -106,7 +110,10 @@ impl Wake for CounterWaker {
     }
 }
 
-fn concurrent_register_and_wake(spmc: SpmcWaker, arc: &Arc<CounterWaker>) {
+fn concurrent_register_and_wake<const SYNC: bool, const CACHED: bool>(
+    spmc: SpmcWaker<SYNC, CACHED>,
+    arc: &Arc<CounterWaker>,
+) {
     #[cfg(not(loom))]
     let registered = thread::scope(|s| {
         s.spawn(|| spmc.wake());
@@ -139,37 +146,49 @@ fn concurrent_register_and_wake(spmc: SpmcWaker, arc: &Arc<CounterWaker>) {
     let waker_count = Arc::strong_count(arc) - 1;
     let wake_count = arc.0.load(Relaxed);
     match (wake_count, waker_count, registered) {
-        (1, 1, true) if super::CACHED => {} // register called before wake
-        (1, 0, true) => {}                  // register called before wake
-        (0, 0, false) => {}                 // register raced with wake
-        (0, 1, true) => {}                  // register called after wake
+        (1, 1, true) if CACHED => {} // register called before wake
+        (1, 0, true) => {}           // register called before wake
+        (0, 0, false) => {}          // register raced with wake
+        (0, 1, true) => {}           // register called after wake
         other => panic!("unexpected outcome: {other:?}"),
     }
 }
 
-#[test]
-fn concurrent_register_empty_and_wake() {
+#[rstest]
+fn concurrent_register_empty_and_wake<const SYNC: bool, const CACHED: bool>(
+    #[values(FALSE, TRUE)] sync: Bool<SYNC>,
+    #[values(FALSE, TRUE)] cached: Bool<CACHED>,
+) {
+    let _ = (sync, cached);
     model(|| {
-        let spmc = SpmcWaker::new();
+        let spmc = SpmcWaker::<SYNC, CACHED>::new();
         let arc = Arc::<CounterWaker>::default();
         concurrent_register_and_wake(spmc, &arc);
     });
 }
 
-#[test]
-fn concurrent_register_overwrite_and_wake() {
+#[rstest]
+fn concurrent_register_overwrite_and_wake<const SYNC: bool, const CACHED: bool>(
+    #[values(FALSE, TRUE)] sync: Bool<SYNC>,
+    #[values(FALSE, TRUE)] cached: Bool<CACHED>,
+) {
+    let _ = (sync, cached);
     model(|| {
-        let spmc = SpmcWaker::new();
+        let spmc = SpmcWaker::<SYNC, CACHED>::new();
         let arc = Arc::<CounterWaker>::default();
         unsafe { spmc.register(Waker::noop()) };
         concurrent_register_and_wake(spmc, &arc);
     });
 }
 
-#[test]
-fn concurrent_unregister_and_wake() {
+#[rstest]
+fn concurrent_unregister_and_wake<const SYNC: bool, const CACHED: bool>(
+    #[values(FALSE, TRUE)] sync: Bool<SYNC>,
+    #[values(FALSE, TRUE)] cached: Bool<CACHED>,
+) {
+    let _ = (sync, cached);
     model(|| {
-        let spmc = SpmcWaker::new();
+        let spmc = SpmcWaker::<SYNC, CACHED>::new();
         let arc = Arc::<CounterWaker>::default();
         assert!(unsafe { spmc.register(&arc.waker()) });
         #[cfg(not(loom))]
@@ -190,16 +209,16 @@ fn concurrent_unregister_and_wake() {
                 let spmc = spmc.clone();
                 move || spmc.wake()
             });
-            let register = thread::spawn({
+            let unregister = thread::spawn({
                 let spmc = spmc.clone();
                 move || unsafe { spmc.unregister() }
             });
             wake1.join().unwrap();
             wake2.join().unwrap();
-            register.join().unwrap()
+            unregister.join().unwrap()
         };
         let waker_count = Arc::strong_count(&arc) - 1;
-        assert_eq!(waker_count, if super::CACHED { 1 } else { 0 });
+        assert_eq!(waker_count, if CACHED { 1 } else { 0 });
         let wake_count = arc.0.load(Relaxed);
         match (unregistered, wake_count) {
             (true, 0) => {}  // unregister called before wake
@@ -211,10 +230,14 @@ fn concurrent_unregister_and_wake() {
 
 // From futures test suite
 #[cfg(not(loom))]
-#[test]
-fn basic() {
-    let ordering = if super::SYNC { Relaxed } else { SeqCst };
-    let atomic_waker = Arc::new(SpmcWaker::new());
+#[rstest]
+fn basic<const SYNC: bool, const CACHED: bool>(
+    #[values(FALSE, TRUE)] sync: Bool<SYNC>,
+    #[values(FALSE, TRUE)] cached: Bool<CACHED>,
+) {
+    let _ = (sync, cached);
+    let ordering = if SYNC { Relaxed } else { SeqCst };
+    let atomic_waker = Arc::new(SpmcWaker::<SYNC, CACHED>::new());
     let atomic_waker_copy = atomic_waker.clone();
 
     let returned_pending = Arc::new(AtomicUsize::new(0));
@@ -258,11 +281,15 @@ fn basic() {
 }
 
 // From tokio test suite
-#[test]
-fn basic_notification() {
-    struct Chan {
+#[rstest]
+fn basic_notification<const SYNC: bool, const CACHED: bool>(
+    #[values(FALSE, TRUE)] sync: Bool<SYNC>,
+    #[values(FALSE, TRUE)] cached: Bool<CACHED>,
+) {
+    let _ = (sync, cached);
+    struct Chan<const S: bool, const C: bool> {
         num: AtomicUsize,
-        task: SpmcWaker,
+        task: SpmcWaker<S, C>,
     }
 
     const NUM_NOTIFY: usize = 2;
@@ -270,9 +297,9 @@ fn basic_notification() {
     use loom::sync::Arc;
 
     model(|| {
-        let chan = Arc::new(Chan {
+        let chan = Arc::new(Chan::<SYNC, CACHED> {
             num: AtomicUsize::new(0),
-            task: SpmcWaker::new(),
+            task: SpmcWaker::<SYNC, CACHED>::new(),
         });
 
         for _ in 0..NUM_NOTIFY {
@@ -287,7 +314,7 @@ fn basic_notification() {
         block_on(poll_fn(move |cx| {
             let registered = unsafe { chan.task.register(cx.waker()) };
 
-            let n = if super::SYNC {
+            let n = if SYNC {
                 chan.num.load(Relaxed)
             } else {
                 chan.num.fetch_add(0, Relaxed)

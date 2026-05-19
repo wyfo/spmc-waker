@@ -30,6 +30,7 @@ portable-atomic = { version = "1", optional = true, default-features = false }
 diatomic-waker = "0.2.3"
 futures = "0.3.32"
 divan = "0.1"
+rstest = "0.26.1"
 
 [lib]
 test = false
