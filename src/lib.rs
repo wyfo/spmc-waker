@@ -461,10 +461,20 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
     /// consume the waker right after this returns `true`, and a concurrent
     /// [`register`] call may store one right after this returns `false`.
     ///
+    /// Calling `has_waker_registered` then `wake` if it is returned `true`
+    /// is guaranteed to provide the same synchronization as calling `wake`
+    /// alone.
+    ///
     /// [`register`]: Self::register
     /// [`wake`]: Self::wake
+    #[inline]
     pub fn has_waker_registered(&self) -> bool {
-        self.state.load(Relaxed) < 2
+        if SYNC {
+            // See `check_before_wake` about `fetch_add(0)`
+            self.state.load(Relaxed) < 2 || self.state.fetch_add(0, SeqCst) < 2
+        } else {
+            self.state.load(SeqCst) < 2
+        }
     }
 
     /// Calls `wake` on the last `Waker` passed to `register`.
