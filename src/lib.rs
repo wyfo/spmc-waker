@@ -58,29 +58,35 @@ const WAKING: usize = 4;
 ///
 /// # Memory ordering
 ///
-/// `SpmcWaker` has a generic `SYNC` parameter which determines the
-/// synchronization guarantees.
+/// `SpmcWaker` atomic operations use `SeqCst` ordering, and it has a generic
+/// `SYNC` parameter which determines the synchronization guarantees.
 ///
-/// ### `SYNC=true` (the default)
+/// ### `SYNC=false` (the default)
+///
+/// There is no acquire-release synchronization between `register` and `wake`.
+///
+/// Because a `wake` call may not see the waker registered by a concurrent
+/// `register`, the waking condition should use a total order, i.e. `SeqCst`
+/// or RMW operations. It ensures that checking the waking condition after
+/// `register` succeeds even when a concurrent `wake` misses the registered
+/// waker.
+///
+/// When no waker is registered, `wake` is reduced to a single atomic load.
+///
+/// ### `SYNC=true`
 ///
 /// Calling `register` "acquires" all memory "released" by calls to `wake`
-/// before the call to `register`. Later calls to `wake` will wake the
-/// registered waker (on contention this wake might be triggered in `register`).
+/// before the call to `register`.
 ///
-/// ### `SYNC=false`
+/// It allows setting the waking condition and checking it with a relaxed
+/// ordering after the registration, at the cost of having a mandatory
+/// atomic RMW operation in `wake`.
 ///
-/// This is a more advanced configuration, where there is no acquire-release
-/// synchronization between `register` and `wake`. A `wake` call may not see
-/// the waker registered by a concurrent `register`.
-///
-/// For this reason, `SpmcWaker<false>` should be paired with a total order,
-/// for example atomic `SeqCst` or RMW operations. It ensures that checking
-/// the waking condition after `register` succeeds even when a concurrent
-/// `wake` misses the registered waker.
-///
-/// It allows optimizing the algorithm even more, especially in the case
-/// where `wake` is called with no waker registered, as it becomes a single
-/// atomic load.
+/// If the waking condition is already set through an atomic RMW operation,
+/// adding `SeqCst` ordering to it and to the waking condition check
+/// comes at a minimal cost, and allows to save an atomic RMW operation
+/// in `wake` by switching to `SYNC=false`. As a matter of fact `SYNC=true`
+/// should only be considered when the waking condition has no RMW involved.
 ///
 /// # Waker caching
 ///
@@ -107,12 +113,15 @@ const WAKING: usize = 4;
 ///
 /// ```rust
 /// use std::{
-///     future::poll_fn,
+///     pin::Pin,
 ///     sync::{
 ///         Arc,
-///         atomic::{AtomicBool, Ordering::Relaxed},
+///         atomic::{
+///             AtomicBool,
+///             Ordering::{Relaxed, SeqCst},
+///         },
 ///     },
-///     task::Poll,
+///     task::{Context, Poll},
 /// };
 ///
 /// use spmc_waker::SpmcWaker;
@@ -127,78 +136,14 @@ const WAKING: usize = 4;
 /// struct Notifier(Arc<Inner>);
 ///
 /// impl Notifier {
-///     fn notify(&self) {
-///         self.0.notified.store(true, Relaxed);
-///         self.0.waker.wake();
-///     }
-/// }
-///
-/// #[derive(Default)]
-/// struct Waiter(Arc<Inner>);
-///
-/// impl Waiter {
-///     async fn wait(&mut self) {
-///         poll_fn(move |cx| {
-///             // quick check to avoid registration if already done.
-///             if self.0.notified.swap(false, Relaxed) {
-///                 return Poll::Ready(());
-///             }
-///             // SAFETY: mutable reference on non-cloneable `Waiter` ensures no concurrent call
-///             unsafe { self.0.waker.register(cx.waker()) };
-///             // Need to check condition **after** `register` to avoid a race
-///             // condition that would result in lost notifications.
-///             if self.0.notified.swap(false, Relaxed) {
-///                 // Unregister the waker to avoid spurious wakeups.
-///                 // SAFETY: mutable reference on non-cloneable `Waiter` ensures no concurrent call
-///                 unsafe { self.0.waker.unregister() };
-///                 Poll::Ready(())
-///             } else {
-///                 Poll::Pending
-///             }
-///         })
-///         .await;
+///     pub fn new() -> Self {
+///         Self(Arc::new(Inner {
+///             waker: SpmcWaker::new(),
+///             notified: AtomicBool::new(false),
+///         }))
 ///     }
 ///
-///     fn notifier(&self) -> Notifier {
-///         Notifier(self.0.clone())
-///     }
-/// }
-///
-/// fn event() -> (Notifier, Waiter) {
-///     let waiter = Waiter::default();
-///     (waiter.notifier(), waiter)
-/// }
-/// ```
-///
-/// The same example with `SYNC=false` requires a total order on `notified` accesses,
-/// for example with `SeqCst` ordering.
-///
-/// ```rust
-/// use std::{
-///     future::poll_fn,
-///     sync::{
-///         Arc,
-///         atomic::{
-///             AtomicBool,
-///             Ordering::{Relaxed, SeqCst},
-///         },
-///     },
-///     task::Poll,
-/// };
-///
-/// use spmc_waker::SpmcWaker;
-///
-/// #[derive(Default)]
-/// struct Inner {
-///     notified: AtomicBool,
-///     waker: SpmcWaker<false>,
-/// }
-///
-/// #[derive(Clone)]
-/// struct Notifier(Arc<Inner>);
-///
-/// impl Notifier {
-///     fn notify(&self) {
+///     pub fn signal(&self) {
 ///         // Use seqcst ordering to synchronize with the load after `register`
 ///         self.0.notified.store(true, SeqCst);
 ///         self.0.waker.wake();
@@ -209,31 +154,34 @@ const WAKING: usize = 4;
 /// struct Waiter(Arc<Inner>);
 ///
 /// impl Waiter {
-///     async fn wait(&mut self) {
-///         poll_fn(move |cx| {
-///             // quick check to avoid registration if already done.
-///             if self.0.notified.swap(false, Relaxed) {
-///                 return Poll::Ready(());
-///             }
-///             // SAFETY: mutable reference on non-cloneable `Waiter` ensures no concurrent call
-///             unsafe { self.0.waker.register(cx.waker()) };
-///             // Need to check condition **after** `register` to avoid a race
-///             // condition that would result in lost notifications.
-///             // Use seqcst ordering so it synchronizes with the store before wake.
-///             if self.0.notified.swap(false, SeqCst) {
-///                 // Unregister the waker to avoid spurious wakeups.
-///                 // SAFETY: mutable reference on non-cloneable `Waiter` ensures no concurrent call
-///                 unsafe { self.0.waker.unregister() };
-///                 Poll::Ready(())
-///             } else {
-///                 Poll::Pending
-///             }
-///         })
-///         .await;
-///     }
-///
 ///     fn notifier(&self) -> Notifier {
 ///         Notifier(self.0.clone())
+///     }
+/// }
+///
+/// impl Future for Waiter {
+///     type Output = ();
+///
+///     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+///         // quick check to avoid registration if already done.
+///         if self.0.notified.load(Relaxed) {
+///             return Poll::Ready(());
+///         }
+///
+///         // SAFETY: mutable reference on non-cloneable `Waiter` ensures no concurrent call
+///         unsafe { self.0.waker.register(cx.waker()) };
+///
+///         // Need to check condition **after** `register` to avoid a race
+///         // condition that would result in lost notifications.
+///         // Use seqcst ordering so it synchronizes with the store before wake.
+///         if self.0.notified.load(SeqCst) {
+///             // Unregister the waker to avoid spurious wakeups.
+///             // SAFETY: mutable reference on non-cloneable `Waiter` ensures no concurrent call
+///             unsafe { self.0.waker.unregister() };
+///             Poll::Ready(())
+///         } else {
+///             Poll::Pending
+///         }
 ///     }
 /// }
 ///
@@ -245,7 +193,7 @@ const WAKING: usize = 4;
 ///
 /// [`AtomicWaker`]: https://docs.rs/futures/latest/futures/task/struct.AtomicWaker.html
 #[derive(Debug)]
-pub struct SpmcWaker<const SYNC: bool = true, const CACHED: bool = true> {
+pub struct SpmcWaker<const SYNC: bool = false, const CACHED: bool = true> {
     wakers: [WakerCell; 2],
     /// State possible values are:
     /// - 0 or 1: A waker is registered in `wakers[state]`
