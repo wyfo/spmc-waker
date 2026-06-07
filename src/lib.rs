@@ -387,10 +387,10 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
     pub unsafe fn unregister(&self) -> bool {
         #[cfg(all(debug_assertions, not(loom)))]
         let _guard = self.exclusive.check();
-        let state = self.state.load(SeqCst);
+        let state = self.state.load(Relaxed);
         if let Some(waker_cell) = self.wakers.get(state) {
             let empty = if CACHED { state | EMPTY } else { EMPTY };
-            let res = self.state.compare_exchange(state, empty, SeqCst, Relaxed);
+            let res = self.state.compare_exchange(state, empty, Relaxed, Relaxed);
             match res {
                 // SAFETY: state has been swapped to EMPTY, so the cell can
                 // no longer be accessed by `wake`, and its waker can be taken
