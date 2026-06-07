@@ -14,6 +14,8 @@ jobs:
         features: [--no-default-features, --all-features]
     steps:
       - uses: actions/checkout@v4
+      - name: update toolchain
+        run: rustup update stable && rustup default stable
       - name: rustfmt
         run: cargo fmt -- --check --config "unstable_features=true,imports_granularity=Crate,group_imports=StdExternalCrate,format_code_in_doc_comments=true"
       - name: clippy
