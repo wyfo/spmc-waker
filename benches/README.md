@@ -10,9 +10,9 @@ comparison                     fastest       │ slowest       │ median       
 ├─ register                                  │               │               │               │         │
 │  ├─ AtomicWaker              12.69 ns      │ 12.76 ns      │ 12.73 ns      │ 12.73 ns      │ 100     │ 12800
 │  ├─ DiatomicWaker            10.84 ns      │ 68.77 ns      │ 10.88 ns      │ 11.46 ns      │ 100     │ 25600
-│  ├─ SpmcWaker                2.592 ns      │ 16.63 ns      │ 2.602 ns      │ 2.947 ns      │ 100     │ 102400
+│  ├─ SpmcWaker                2.337 ns      │ 16.6 ns       │ 2.345 ns      │ 2.682 ns      │ 100     │ 102400
 │  ├─ SpmcWaker<false, false>  2.209 ns      │ 16.71 ns      │ 2.217 ns      │ 2.566 ns      │ 100     │ 102400
-│  ├─ SpmcWaker<false>         2.337 ns      │ 16.6 ns       │ 2.345 ns      │ 2.682 ns      │ 100     │ 102400
+│  ├─ SpmcWaker<true>          2.592 ns      │ 16.63 ns      │ 2.602 ns      │ 2.947 ns      │ 100     │ 102400
 │  ╰─ SpmcWaker<true, false>   2.095 ns      │ 27.93 ns      │ 2.176 ns      │ 3.376 ns      │ 100     │ 102400
 ├─ register_overwrite                        │               │               │               │         │
 │  ├─ AtomicWaker              47.14 ns      │ 491 ns        │ 48.52 ns      │ 58.75 ns      │ 100     │ 3200
