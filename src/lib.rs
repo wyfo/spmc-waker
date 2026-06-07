@@ -388,19 +388,23 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         #[cfg(all(debug_assertions, not(loom)))]
         let _guard = self.exclusive.check();
         let state = self.state.load(Relaxed);
-        if let Some(waker_cell) = self.wakers.get(state) {
-            let empty = if CACHED { state | EMPTY } else { EMPTY };
-            let res = self.state.compare_exchange(state, empty, Relaxed, Relaxed);
-            match res {
-                // SAFETY: state has been swapped to EMPTY, so the cell can
-                // no longer be accessed by `wake`, and its waker can be taken
-                Ok(_) if !CACHED => unsafe { waker_cell.drop() },
-                Ok(_) => {}
-                Err(s) => debug_assert!(s >= 2),
-            }
-            return res.is_ok();
+        (state < 2) && self.unregister_cold(state)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn unregister_cold(&self, state: usize) -> bool {
+        let waker_cell = unsafe { self.wakers.get_unchecked(state) };
+        let empty = if CACHED { state | EMPTY } else { EMPTY };
+        let res = self.state.compare_exchange(state, empty, Relaxed, Relaxed);
+        match res {
+            // SAFETY: state has been swapped to EMPTY, so the cell can
+            // no longer be accessed by `wake`, and its waker can be taken
+            Ok(_) if !CACHED => unsafe { waker_cell.drop() },
+            Ok(_) => {}
+            Err(s) => debug_assert!(s >= 2),
         }
-        false
+        res.is_ok()
     }
 
     /// Returns `true` if a waker is currently registered.
