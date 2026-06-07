@@ -41,6 +41,9 @@ impl AtomicWaker for DiatomicWaker {
 }
 
 struct FakeWaker;
+// A manual noop waker is required to make Arc cloning visible in benchmarks,
+// and to have different wakers for overwrite bench.
+#[allow(clippy::manual_noop_waker)]
 impl Wake for FakeWaker {
     fn wake(self: Arc<Self>) {}
 }
