@@ -388,15 +388,19 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         #[cfg(all(debug_assertions, not(loom)))]
         let _guard = self.exclusive.check();
         let state = self.state.load(Relaxed);
-        if state >= 2 {
+        let Some(waker_cell) = self.wakers.get(state) else {
             return false;
-        }
+        };
         let empty = if CACHED { state | EMPTY } else { EMPTY };
+        // Relaxed order is ok here, as `unregister` and `register` are called in the same
+        // thread, i.e. sequenced-before, so there is no risk that this CAS make possible a
+        // stale load of an empty state instead of inhabited state. It may provoke a stale load
+        // of inhabited state while empty, but wake deals with it.
         let res = self.state.compare_exchange(state, empty, Relaxed, Relaxed);
         match res {
             // SAFETY: state has been swapped to EMPTY, so the cell can
             // no longer be accessed by `wake`, and its waker can be taken
-            Ok(_) if !CACHED => unsafe { self.wakers.get_unchecked(state).drop() },
+            Ok(_) if !CACHED => unsafe { waker_cell.drop() },
             Ok(_) => {}
             Err(s) => debug_assert!(s >= 2),
         }
