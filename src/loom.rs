@@ -23,105 +23,89 @@ pub(crate) mod sync {
 
         #[cfg(loom)]
         #[derive(Debug)]
-        pub(crate) struct AtomicUsize(loom::sync::atomic::AtomicUsize);
+        pub(crate) struct AtomicPtr<T> {
+            atomic: loom::sync::atomic::AtomicUsize,
+            _phantom: core::marker::PhantomData<*mut T>,
+        }
 
         #[cfg(loom)]
-        impl AtomicUsize {
-            pub(crate) fn new(x: usize) -> Self {
-                Self(loom::sync::atomic::AtomicUsize::new(x))
+        impl<T> AtomicPtr<T> {
+            pub(crate) fn new(x: *mut T) -> Self {
+                Self {
+                    atomic: loom::sync::atomic::AtomicUsize::new(x.expose_provenance()),
+                    _phantom: core::marker::PhantomData,
+                }
             }
 
-            pub(crate) fn with_mut<R>(&mut self, f: impl FnOnce(&mut usize) -> R) -> R {
-                self.0.with_mut(|x| f(x))
+            pub(crate) fn load(&self, order: Ordering) -> *mut T {
+                seqcst_fence(order);
+                core::ptr::with_exposed_provenance_mut(self.atomic.load(order))
             }
 
-            pub(crate) fn load(&self, order: Ordering) -> usize {
-                seqcst_fence(order);
-                self.0.load(order)
+            pub(in crate::loom) fn load_mut(&mut self) -> *mut T {
+                core::ptr::with_exposed_provenance_mut(self.atomic.with_mut(|x| *x))
             }
 
-            pub(crate) fn store(&self, x: usize, order: Ordering) {
-                self.0.store(x, order);
+            pub(crate) fn store(&self, x: *mut T, order: Ordering) {
+                self.atomic.store(x.expose_provenance(), order);
                 seqcst_fence(order);
             }
 
-            pub(crate) fn swap(&self, x: usize, order: Ordering) -> usize {
+            pub(crate) fn swap(&self, x: *mut T, order: Ordering) -> *mut T {
                 seqcst_fence(order);
-                let res = self.0.swap(x, order);
+                let res = self.atomic.swap(x.expose_provenance(), order);
                 seqcst_fence(order);
-                res
+                core::ptr::with_exposed_provenance_mut(res)
             }
 
             pub(crate) fn compare_exchange(
                 &self,
-                current: usize,
-                new: usize,
+                current: *mut T,
+                new: *mut T,
                 success: Ordering,
                 failure: Ordering,
-            ) -> Result<usize, usize> {
+            ) -> Result<*mut T, *mut T> {
                 seqcst_fence(success);
-                let res = self.0.compare_exchange(current, new, success, failure);
+                let res = self.atomic.compare_exchange(
+                    current.expose_provenance(),
+                    new.expose_provenance(),
+                    success,
+                    failure,
+                );
                 if res.is_ok() {
                     seqcst_fence(success);
                 }
-                res
+                res.map(core::ptr::with_exposed_provenance_mut)
+                    .map_err(core::ptr::with_exposed_provenance_mut)
             }
 
-            pub(crate) fn fetch_add(&self, val: usize, order: Ordering) -> usize {
+            pub(crate) fn fetch_byte_add(&self, val: usize, order: Ordering) -> *mut T {
                 seqcst_fence(order);
-                let res = self.0.fetch_add(val, order);
+                let res = self.atomic.fetch_add(val, order);
                 seqcst_fence(order);
-                res
+                core::ptr::with_exposed_provenance_mut(res)
             }
 
-            pub(crate) fn fetch_or(&self, val: usize, order: Ordering) -> usize {
+            pub(crate) fn fetch_or(&self, val: usize, order: Ordering) -> *mut T {
                 seqcst_fence(order);
-                let res = self.0.fetch_or(val, order);
+                let res = self.atomic.fetch_or(val, order);
                 seqcst_fence(order);
-                res
+                core::ptr::with_exposed_provenance_mut(res)
             }
         }
     }
 }
 
-pub(crate) trait UnsafeCellExt<T> {
-    /// # Safety
-    ///
-    /// Cell content must be safe to deref immutably.
-    unsafe fn with_ref<R, F: FnOnce(&T) -> R>(&self, f: F) -> R;
-    /// # Safety
-    ///
-    /// Cell content must be safe to deref mutably.
-    unsafe fn with_ref_mut<R, F: FnOnce(&mut T) -> R>(&self, f: F) -> R;
+pub(crate) trait AtomicPtrExt<T> {
+    fn load_mut(&mut self) -> *mut T;
 }
 
-impl<T> UnsafeCellExt<T> for cell::UnsafeCell<T> {
+impl<T> AtomicPtrExt<T> for sync::atomic::AtomicPtr<T> {
     #[cfg_attr(loom, track_caller)]
-    unsafe fn with_ref<R, F: FnOnce(&T) -> R>(&self, f: F) -> R {
-        #[cfg(not(loom))]
-        return f(unsafe { &*self.get() });
-        #[cfg(loom)]
-        return self.with(|ptr| f(unsafe { &*ptr }));
-    }
-    #[cfg_attr(loom, track_caller)]
-    unsafe fn with_ref_mut<R, F: FnOnce(&mut T) -> R>(&self, f: F) -> R {
-        #[cfg(not(loom))]
-        return f(unsafe { &mut *self.get() });
-        #[cfg(loom)]
-        return self.with_mut(|ptr| f(unsafe { &mut *ptr }));
-    }
-}
-
-pub(crate) trait AtomicUsizeExt {
-    fn load_mut(&mut self) -> usize;
-}
-
-impl AtomicUsizeExt for sync::atomic::AtomicUsize {
-    #[cfg_attr(loom, track_caller)]
-    fn load_mut(&mut self) -> usize {
+    fn load_mut(&mut self) -> *mut T {
         #[cfg(not(loom))]
         return *self.get_mut();
         #[cfg(loom)]
-        return self.with_mut(|v| *v);
+        return self.load_mut();
     }
 }

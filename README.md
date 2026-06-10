@@ -98,7 +98,7 @@ fn event() -> (Notifier, Waiter) {
 
 #### Optional synchronization
 
-`AtomicWaker::wake` always synchronizes with `AtomicWaker::register`. For its part, `SpmcWaker` comes with a generic boolean parameter `SYNC`, which decides if `SpmcWaker::wake` synchronizes with `SpmcWaker::register` (`SYNC=true`), or not (`SYNC=false`, the default). Workflows using `SpmcWaker<false>` require the waking condition to use a total order, such as `SeqCst` ordering or RMW operations. It ensures that checking the waking condition after `register` succeeds even when a concurrent `wake` misses the registered waker.
+`AtomicWaker::wake` always synchronizes with `AtomicWaker::register`. For its part, `SpmcWaker` comes with a generic boolean parameter `SYNC`, which decides if `SpmcWaker::wake` synchronizes with `SpmcWaker::register` (`SYNC=true`), or not (`SYNC=false`, the default). Workflows using `SpmcWaker` (with `SYNC=false`) require the waking condition to use a total order, such as `SeqCst` ordering or RMW operations. It ensures that checking the waking condition after `register` succeeds even when a concurrent `wake` misses the registered waker.
 
 #### Waker caching
 
@@ -127,9 +127,5 @@ As a concrete example, replacing `AtomicWaker` with `SpmcWaker` in `tokio::sync:
 ## Safety
 
 This crate uses unsafe code, as well as exposing unsafe methods. It is tested with both [`miri`](https://github.com/rust-lang/miri) and [`loom`](https://github.com/tokio-rs/loom), including tests adapted from `AtomicWaker`.
-
-## Acknowledgement
-
-The idea of waker caching has been borrowed from [diatomic-waker](https://crates.io/crates/diatomic-waker) crate.
 
 [^1]: It has no effect on x86_64, as a `SeqCst` store is compiled to an `xchg` instruction — same as swap, but it matters on aarch64.

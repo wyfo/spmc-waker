@@ -18,7 +18,7 @@ categories = [
 ]
 repository = "https://github.com/wyfo/spmc-waker"
 description = "A cached SPMC atomic waker."
-rust-version = "1.85"
+rust-version = "1.91"
 
 [features]
 portable-atomic = ["dep:portable-atomic"]
