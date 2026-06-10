@@ -96,9 +96,12 @@ fn model(f: impl FnOnce()) {
 }
 
 #[cfg(any(debug_assertions, loom))]
-#[test]
+#[rstest]
 #[should_panic]
-fn exclusive_access() {
+fn exclusive_access<const SYNC: bool, const CACHED: bool>(
+    #[values(FALSE, TRUE)] _sync: Bool<SYNC>,
+    #[values(FALSE, TRUE)] _cached: Bool<CACHED>,
+) {
     #[cfg(loom)] // loom is not able to detect the data race
     if true {
         panic!();
@@ -122,7 +125,7 @@ fn exclusive_access() {
                 STOP.store(true, SeqCst);
             }
         }
-        let spmc = <SpmcWaker>::new();
+        let spmc = SpmcWaker::<SYNC, CACHED>::new();
         let waker = unsafe { Waker::from_raw(raw_waker()) };
         thread::scope(|s| {
             s.spawn(|| {
