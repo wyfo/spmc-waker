@@ -641,9 +641,10 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         // the stale vtable load in the SeqCst total order. But loading a vtable
         // older in modification order than the registration would coherence-order
         // the load *before* the registration — contradiction.
-        // See https://github.com/rust-lang/miri/issues/5104
-        let ordering = if cfg!(miri) { SeqCst } else { Release };
-        self.unregister_and_wake(vtable, |vt| self.vtable.store(vt, ordering), wake)
+        #[cfg(not(miri))]
+        return self.unregister_and_wake(vtable, |vt| self.vtable.store(vt, Release), wake);
+        #[cfg(miri)] // See https://github.com/rust-lang/miri/issues/5104
+        return self.unregister_and_wake(vtable, |vt| self.vtable.store(vt, SeqCst), wake); // !ORDERING
     }
 
     #[cold]

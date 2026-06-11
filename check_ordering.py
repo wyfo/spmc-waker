@@ -16,7 +16,7 @@ TEST_CMD = ["cargo", "test", "--release"]
 TEST_ENV = {**os.environ, "LOOM_MAX_PREEMPTIONS": "1", "RUSTFLAGS": "--cfg=loom"}
 
 DOWNGRADE = {
-    "SeqCst": ["AcqRel"],
+    "SeqCst": ["AcqRel", "Acquire", "Release"],
     "AcqRel": ["Acquire", "Release"],
     "Acquire": ["Relaxed"],
     "Release": ["Relaxed"],
@@ -29,16 +29,16 @@ def find_mutations(lines):
     """Yield (line_idx, start, end, old, new) for each mutation to test."""
     for i, line in enumerate(lines):
         stripped = line.lstrip()
-        if stripped.startswith("//") or "NOOP_VTABLE" in line:
+        if stripped.startswith("//") or "NOOP_VTABLE" in line or "!ORDERING" in line:
             continue
         if FENCE_RE.match(line):
             # Remove the fence statement by commenting it out
-            yield (i, None, None, line, FENCE_RE.sub(r"\1// fence(", line, count=1))
+            yield i, None, None, line, FENCE_RE.sub(r"\1// fence(", line, count=1)
             continue
         for m in ORDERING_RE.finditer(line):
             old = m.group(1)
             for new in DOWNGRADE[old]:
-                yield (i, m.start(), m.end(), old, new)
+                yield i, m.start(), m.end(), old, new
 
 
 def apply(lines, line_idx, start, end, new):
