@@ -361,13 +361,11 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         if vtable.addr() & WAKING != 0 {
             // A thread is currently waking the registered waker, so we can
             // assume we should not wait and return immediately.
-            // If a waking thread is preempted before resetting the state,
-            // the task could loop infinitely on this state. This
-            // is caught by loom and requires `spin_loop` to escape the
-            // infinite loop. In practice, `spin_loop` or `Waker::wake`
-            // are already expected to be called in between.
-            #[cfg(loom)]
-            ::loom::hint::spin_loop();
+            // An Acquire fence is emitted with SYNC=true to synchronize with `wake`
+            // only for CACHED=true, as CACHED=false already handle it in `register`.
+            if CACHED && SYNC {
+                fence(Acquire);
+            }
             return false;
         }
         // The waker data will surely be modified after this point, so it

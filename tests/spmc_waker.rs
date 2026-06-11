@@ -68,8 +68,7 @@ mod thread {
     }
 
     impl ScopedJoinHandle<'_, '_> {
-        #[allow(dead_code)]
-        fn join(self) -> std::thread::Result<()> {
+        pub fn join(self) -> std::thread::Result<()> {
             self.scope.handles.borrow_mut()[self.handle_idx]
                 .take()
                 .unwrap()
@@ -278,20 +277,30 @@ fn concurrent_reregister_and_wake<const SYNC: bool, const CACHED: bool>(
 fn register_synchronizes_with_wake<const CACHED: bool>(
     #[values(FALSE, TRUE)] _cached: Bool<CACHED>,
     #[values(WakeMode::Normal, WakeMode::Cold, WakeMode::CheckBefore)] wake_mode: WakeMode,
+    #[values(false, true)] same_waker: bool,
 ) {
     model(move || {
         let spmc = SpmcWaker::<true, CACHED>::new();
         let condition = AtomicUsize::new(0);
-        let waker = CounterWaker::new();
-        assert!(unsafe { spmc.register(&waker.waker()) });
+        // Waker vtable derived from `Arc<W>` is not stable across clone, so
+        // we need a first clone to ensure cache will be hit.
+        let waker = CounterWaker::new().waker().clone();
+        let other_waker = if same_waker {
+            waker.clone()
+        } else {
+            CounterWaker::new().waker()
+        };
+        assert!(unsafe { spmc.register(&waker) });
         thread::scope(|s| {
-            s.spawn(|| {
+            let wake = s.spawn(|| {
                 condition.store(1, Relaxed);
                 spmc.wake2(wake_mode);
             });
-            let registered = unsafe { spmc.register(Waker::noop()) };
-            if !registered || waker.wake_count() == 1 {
-                assert_eq!(condition.load(Relaxed), 1);
+            let registered = unsafe { spmc.register(&other_waker) };
+            let loaded = condition.load(Relaxed);
+            wake.join().unwrap();
+            if !registered || spmc.has_waker_registered() {
+                assert_eq!(loaded, 1);
             }
         });
     });
@@ -390,6 +399,12 @@ fn basic_notification<const SYNC: bool, const CACHED: bool>(
             }
 
             if !registered {
+                // If a waking thread is preempted before finishing wake,
+                // the task could loop infinitely on this state. This
+                // is caught by loom and requires `spin_loop` to escape the
+                // infinite loop.
+                #[cfg(loom)]
+                loom::hint::spin_loop();
                 cx.waker().wake_by_ref();
             }
 
