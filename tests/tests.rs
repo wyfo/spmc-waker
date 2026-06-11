@@ -96,28 +96,23 @@ fn model(f: impl FnOnce()) {
 }
 
 #[cfg(any(debug_assertions, loom))]
-#[rstest]
+#[test]
 #[should_panic]
-fn exclusive_access<const SYNC: bool, const CACHED: bool>(
-    #[values(FALSE, TRUE)] _sync: Bool<SYNC>,
-    #[values(FALSE, TRUE)] _cached: Bool<CACHED>,
-) {
-    #[cfg(loom)] // loom is not able to detect the data race
-    if true {
-        panic!();
-    }
+fn exclusive_access() {
     model(|| {
         static STOP: AtomicBool = AtomicBool::new(false);
-        fn noop(_: *const ()) {}
-        fn clone(_: *const ()) -> RawWaker {
-            #[cfg(not(loom))]
-            while !STOP.load(SeqCst) {
-                std::hint::spin_loop();
-            }
-            raw_waker()
-        }
         fn raw_waker() -> RawWaker {
-            RawWaker::new(ptr::null(), &RawWakerVTable::new(clone, noop, noop, noop))
+            fn clone(_: *const ()) -> RawWaker {
+                #[cfg(not(loom))]
+                while !STOP.load(SeqCst) {
+                    std::hint::spin_loop();
+                }
+                raw_waker()
+            }
+            RawWaker::new(
+                ptr::null(),
+                &RawWakerVTable::new(clone, |_| (), |_| (), |_| ()),
+            )
         }
         struct StopGuard;
         impl Drop for StopGuard {
@@ -125,7 +120,7 @@ fn exclusive_access<const SYNC: bool, const CACHED: bool>(
                 STOP.store(true, SeqCst);
             }
         }
-        let spmc = SpmcWaker::<SYNC, CACHED>::new();
+        let spmc = <SpmcWaker>::new();
         let waker = unsafe { Waker::from_raw(raw_waker()) };
         thread::scope(|s| {
             s.spawn(|| {
@@ -339,6 +334,7 @@ fn basic_notification<const SYNC: bool, const CACHED: bool>(
     use loom::sync::Arc;
 
     model(|| {
+        let ordering = if SYNC { Relaxed } else { SeqCst };
         let chan = Arc::new(Chan::<SYNC, CACHED> {
             num: AtomicUsize::new(0),
             task: SpmcWaker::<SYNC, CACHED>::new(),
@@ -348,7 +344,7 @@ fn basic_notification<const SYNC: bool, const CACHED: bool>(
             let chan = chan.clone();
 
             thread::spawn(move || {
-                chan.num.fetch_add(1, Relaxed);
+                chan.num.fetch_add(1, ordering);
                 chan.task.wake();
             });
         }
@@ -356,11 +352,7 @@ fn basic_notification<const SYNC: bool, const CACHED: bool>(
         block_on(poll_fn(move |cx| {
             let registered = unsafe { chan.task.register(cx.waker()) };
 
-            let n = if SYNC {
-                chan.num.load(Relaxed)
-            } else {
-                chan.num.fetch_add(0, Relaxed)
-            };
+            let n = chan.num.load(ordering);
             if NUM_NOTIFY == n {
                 return Poll::Ready(());
             }

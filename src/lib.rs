@@ -76,37 +76,40 @@ static NOOP_VTABLE: &RawWakerVTable = &RawWakerVTable::new(
 /// This assumption allows significant optimizations compared to an MPMC algorithm
 /// like [`AtomicWaker`].
 ///
-/// # Memory ordering
+/// # Synchronization
 ///
-/// `SpmcWaker` atomic operations use `SeqCst` ordering, and it has a generic
-/// `SYNC` parameter which determines the synchronization guarantees.
+/// `SpmcWaker` has a generic `SYNC` parameter which determines the
+/// synchronization guarantees.
 ///
-/// ### `SYNC=false` (the default)
-///
-/// There is no acquire-release synchronization between `register` and `wake`.
-///
-/// Because a `wake` call may not see the waker registered by a concurrent
-/// `register`, the waking condition should use a total order, i.e. `SeqCst`
-/// or RMW operations. It ensures that checking the waking condition after
-/// `register` succeeds even when a concurrent `wake` misses the registered
-/// waker.
-///
-/// When no waker is registered, `wake` is reduced to a single atomic load.
-///
-/// ### `SYNC=true`
+/// ### `SYNC=true` (the default)
 ///
 /// Calling `register` "acquires" all memory "released" by calls to `wake`
-/// before the call to `register`.
+/// before the call to `register`. Later calls to `wake` will wake the
+/// registered waker.
 ///
-/// It allows setting the waking condition and checking it with a relaxed
-/// ordering after the registration, at the cost of having a mandatory
-/// atomic RMW operation in `wake`.
+/// ### `SYNC=false` (aliased to [`UnsynchronizedSpmcWaker`])
 ///
-/// If the waking condition is already set through an atomic RMW operation,
-/// adding `SeqCst` ordering to it and to the waking condition check
-/// comes at a minimal cost, and allows to save an atomic RMW operation
-/// in `wake` by switching to `SYNC=false`. As a matter of fact `SYNC=true`
-/// should only be considered when the waking condition has no RMW involved.
+/// This is a more advanced configuration, where there is no acquire-release
+/// synchronization between `register` and `wake`.
+///
+/// `register` and `wake` both use [`SeqCst`] ordering, and they rely on the `SeqCst`
+/// pattern `store X; load Y || store Y; load X` to not miss any notification, where
+/// X is the wake condition and Y the internal `SpmcWaker` state; `load Y` is `wake`
+/// while `store Y` is `register`. That's why the wake condition should use `SeqCst`
+/// for `store` and `load`.
+///
+/// It allows optimizing the algorithm even more, especially in the case where `wake`
+/// is called with no waker registered, as it becomes a single atomic load (instead
+/// of an atomic RMW operation for `SYNC=true`). In fact, `UnsyncSpmcWaker` is
+/// read-only as long as there is no waker registered. That makes it suitable to be
+/// placed alongside other read-only data.
+/// (As a side effect of a compiler optimization, `wake` with no waker registered
+/// is also read-only on x86 platforms with `SYNC=true`, but not on aarch64)
+///
+/// `UnsyncSpmcWaker` is particularly suited when the wake condition is already
+/// updated through an atomic RMW operation. In that case, the cost of adding
+/// `SeqCst` ordering to it is small compared to the significant gain of replacing
+/// an atomic RMW operation by an atomic load in `wake`.
 ///
 /// # Waker caching
 ///
@@ -123,23 +126,19 @@ static NOOP_VTABLE: &RawWakerVTable = &RawWakerVTable::new(
 ///
 /// ### `CACHED=false`
 ///
-/// Waker is cloned when registered by reference, and the tasks are woken with
+/// Waker is always cloned on `register`, and the tasks are woken with
 /// [`Waker::wake`].
 ///
 /// # Examples
 ///
-/// Here is a simple example providing a `Flag` that can be signaled manually
-/// when it is ready.
+/// Here is a simple example providing a `Notifier`/`Waiter` pair.
 ///
 /// ```rust
 /// use std::{
 ///     pin::Pin,
 ///     sync::{
 ///         Arc,
-///         atomic::{
-///             AtomicBool,
-///             Ordering::{Relaxed, SeqCst},
-///         },
+///         atomic::{AtomicBool, Ordering::Relaxed},
 ///     },
 ///     task::{Context, Poll},
 /// };
@@ -164,8 +163,7 @@ static NOOP_VTABLE: &RawWakerVTable = &RawWakerVTable::new(
 ///     }
 ///
 ///     pub fn signal(&self) {
-///         // Use seqcst ordering to synchronize with the load after `register`
-///         self.0.notified.store(true, SeqCst);
+///         self.0.notified.store(true, Relaxed);
 ///         self.0.waker.wake();
 ///     }
 /// }
@@ -193,8 +191,7 @@ static NOOP_VTABLE: &RawWakerVTable = &RawWakerVTable::new(
 ///
 ///         // Need to check condition **after** `register` to avoid a race
 ///         // condition that would result in lost notifications.
-///         // Use seqcst ordering so it synchronizes with the store before wake.
-///         if self.0.notified.load(SeqCst) {
+///         if self.0.notified.load(Relaxed) {
 ///             // Unregister the waker to avoid spurious wakeups.
 ///             // SAFETY: mutable reference on non-cloneable `Waiter` ensures no concurrent call
 ///             unsafe { self.0.waker.unregister() };
@@ -211,9 +208,11 @@ static NOOP_VTABLE: &RawWakerVTable = &RawWakerVTable::new(
 /// }
 /// ```
 ///
+/// An example with `SYNC=false` is presented in [`UnsynchronizedSpmcWaker`] documentation.
+///
 /// [`AtomicWaker`]: https://docs.rs/futures/latest/futures/task/struct.AtomicWaker.html
 #[derive(Debug)]
-pub struct SpmcWaker<const SYNC: bool = false, const CACHED: bool = true> {
+pub struct SpmcWaker<const SYNC: bool = true, const CACHED: bool = true> {
     vtable: AtomicPtr<RawWakerVTable>,
     data: Cell<*const ()>,
     #[cfg(all(debug_assertions, not(loom)))]
@@ -280,7 +279,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
     /// to succeed, in which case it will return `false`. If despite the
     /// concurrent `wake`, the wakeup condition is still not fulfilled, then
     /// `Waker::wake` might be called to reschedule the task and give it
-    /// another opportunity to register is waker — this would be equivalent
+    /// another opportunity to register its waker — this would be equivalent
     /// to [`std::thread::yield_now`]. It is also possible to call `register`
     /// in small [spin-loop](std::hint::spin_loop), before falling back to
     /// calling `Waker::wake`.
@@ -685,6 +684,98 @@ impl<const SYNC: bool, const CACHED: bool> Default for SpmcWaker<SYNC, CACHED> {
         Self::new()
     }
 }
+
+/// Advanced configuration of [`SpmcWaker`] providing no synchronization
+/// between `register` and `wake`.
+///
+/// It should be paired with [`SeqCst`] ordering on the wakeup condition.
+/// See [Synchronization section](SpmcWaker#syncfalse-aliased-to-unsynchronizedspmcwaker)
+/// for more details.
+///
+/// # Examples
+///
+/// Here is the `SpmcWaker` example rewritten for `UnsyncSpmcWaker` using `SeqCst` ordering:
+///
+/// ```rust
+/// use std::{
+///     pin::Pin,
+///     sync::{
+///         Arc,
+///         atomic::{
+///             AtomicBool,
+///             Ordering::{Relaxed, SeqCst},
+///         },
+///     },
+///     task::{Context, Poll},
+/// };
+///
+/// use spmc_waker::UnsynchronizedSpmcWaker;
+///
+/// #[derive(Default)]
+/// struct Inner {
+///     notified: AtomicBool,
+///     waker: UnsynchronizedSpmcWaker,
+/// }
+///
+/// #[derive(Clone)]
+/// struct Notifier(Arc<Inner>);
+///
+/// impl Notifier {
+///     pub fn new() -> Self {
+///         Self(Arc::new(Inner {
+///             waker: UnsynchronizedSpmcWaker::new(),
+///             notified: AtomicBool::new(false),
+///         }))
+///     }
+///
+///     pub fn signal(&self) {
+///         // `UnsyncSpmcWaker` requires `SeqCst` ordering.
+///         self.0.notified.store(true, SeqCst);
+///         self.0.waker.wake();
+///     }
+/// }
+///
+/// #[derive(Default)]
+/// struct Waiter(Arc<Inner>);
+///
+/// impl Waiter {
+///     fn notifier(&self) -> Notifier {
+///         Notifier(self.0.clone())
+///     }
+/// }
+///
+/// impl Future for Waiter {
+///     type Output = ();
+///
+///     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+///         // quick check to avoid registration if already done.
+///         if self.0.notified.load(Relaxed) {
+///             return Poll::Ready(());
+///         }
+///
+///         // SAFETY: mutable reference on non-cloneable `Waiter` ensures no concurrent call
+///         unsafe { self.0.waker.register(cx.waker()) };
+///
+///         // Need to check condition **after** `register` to avoid a race
+///         // condition that would result in lost notifications.
+///         // `UnsyncSpmcWaker` requires `SeqCst` ordering.
+///         if self.0.notified.load(SeqCst) {
+///             // Unregister the waker to avoid spurious wakeups.
+///             // SAFETY: mutable reference on non-cloneable `Waiter` ensures no concurrent call
+///             unsafe { self.0.waker.unregister() };
+///             Poll::Ready(())
+///         } else {
+///             Poll::Pending
+///         }
+///     }
+/// }
+///
+/// fn event() -> (Notifier, Waiter) {
+///     let waiter = Waiter::default();
+///     (waiter.notifier(), waiter)
+/// }
+/// ```
+pub type UnsynchronizedSpmcWaker<const CACHED: bool = true> = SpmcWaker<false, CACHED>;
 
 struct Defer<F: FnOnce()>(ManuallyDrop<F>);
 
