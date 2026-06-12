@@ -38,7 +38,7 @@ impl Waiter {
                 return Poll::Ready(());
             }
             // SAFETY: mutable reference on non-cloneable `Waiter` ensures no concurrent call
-            unsafe { self.0.waker.register(cx.waker()) };
+            let registered = unsafe { self.0.waker.register(cx.waker()) };
             // Need to check condition **after** `register` to avoid a race
             // condition that would result in lost notifications.
             if self.0.notified.swap(false, Relaxed) {
@@ -47,6 +47,11 @@ impl Waiter {
                 unsafe { self.0.waker.unregister() };
                 Poll::Ready(())
             } else {
+                // Waker wasn't registered, but wake condition is still not fulfilled.
+                // Reschedule to retry later.
+                if !registered {
+                    cx.waker().wake_by_ref();
+                }
                 Poll::Pending
             }
         })
