@@ -100,13 +100,13 @@ static NOOP_VTABLE: &RawWakerVTable = &RawWakerVTable::new(
 ///
 /// It allows optimizing the algorithm even more, especially in the case where `wake`
 /// is called with no waker registered, as it becomes a single atomic load (instead
-/// of an atomic RMW operation for `SYNC=true`). In fact, `UnsyncSpmcWaker` is
+/// of an atomic RMW operation for `SYNC=true`). In fact, `UnsynchronizedSpmcWaker` is
 /// read-only as long as there is no waker registered. That makes it suitable to be
 /// placed alongside other read-only data.
 /// (As a side effect of a compiler optimization, `wake` with no waker registered
 /// is also read-only on x86 platforms with `SYNC=true`, but not on aarch64)
 ///
-/// `UnsyncSpmcWaker` is particularly suited when the wake condition is already
+/// `UnsynchronizedSpmcWaker` is particularly suited when the wake condition is already
 /// updated through an atomic RMW operation. In that case, the cost of adding
 /// `SeqCst` ordering to it is small compared to the significant gain of replacing
 /// an atomic RMW operation by an atomic load in `wake`.
@@ -700,7 +700,7 @@ impl<const SYNC: bool, const CACHED: bool> Default for SpmcWaker<SYNC, CACHED> {
 ///
 /// # Examples
 ///
-/// Here is the `SpmcWaker` example rewritten for `UnsyncSpmcWaker` using `SeqCst` ordering:
+/// Here is the `SpmcWaker` example rewritten for `UnsynchronizedSpmcWaker` using `SeqCst` ordering:
 ///
 /// ```rust
 /// use std::{
@@ -735,7 +735,7 @@ impl<const SYNC: bool, const CACHED: bool> Default for SpmcWaker<SYNC, CACHED> {
 ///     }
 ///
 ///     pub fn signal(&self) {
-///         // `UnsyncSpmcWaker` requires `SeqCst` ordering.
+///         // `UnsynchronizedSpmcWaker` requires `SeqCst` ordering.
 ///         self.0.notified.store(true, SeqCst);
 ///         self.0.waker.wake();
 ///     }
@@ -764,7 +764,7 @@ impl<const SYNC: bool, const CACHED: bool> Default for SpmcWaker<SYNC, CACHED> {
 ///
 ///         // Need to check condition **after** `register` to avoid a race
 ///         // condition that would result in lost notifications.
-///         // `UnsyncSpmcWaker` requires `SeqCst` ordering.
+///         // `UnsynchronizedSpmcWaker` requires `SeqCst` ordering.
 ///         if self.0.notified.load(SeqCst) {
 ///             // Unregister the waker to avoid spurious wakeups.
 ///             // SAFETY: mutable reference on non-cloneable `Waiter` ensures no concurrent call
