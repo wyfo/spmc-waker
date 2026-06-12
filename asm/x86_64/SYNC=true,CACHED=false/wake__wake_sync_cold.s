@@ -5,19 +5,10 @@ spmc_waker::SpmcWaker<_,_>::wake_sync_cold:
 	or rcx, 2
 	lock cmpxchg	qword ptr [rdi], rcx
 	jne .LBB0_1
-	mov ecx, eax
-	and ecx, 3
-	cmp ecx, 1
-	jne .LBB0_3
-	mov rdx, rax
-	dec rdx
-	mov rcx, qword ptr [rdi + 8]
-	xchg qword ptr [rdi], rdx
-	mov rdi, rcx
-	jmp qword ptr [rax + 7]
-.LBB0_3:
 	test al, 2
 	jne .LBB0_5
+	test al, 1
+	jne .LBB0_6
 	mov rcx, rax
 	add rcx, 2
 	mov rdx, rax
@@ -25,3 +16,10 @@ spmc_waker::SpmcWaker<_,_>::wake_sync_cold:
 	lock cmpxchg	qword ptr [rdi], rdx
 .LBB0_5:
 	ret
+.LBB0_6:
+	mov rdx, rax
+	dec rdx
+	mov rcx, qword ptr [rdi + 8]
+	xchg qword ptr [rdi], rdx
+	mov rdi, rcx
+	jmp qword ptr [rax + 7]

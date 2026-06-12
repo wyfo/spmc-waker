@@ -1,7 +1,9 @@
 uu_wake:
 	ldar x9, [x0]
-	tbz w9, #0, .LBB1_3
-	mov w8, #2
+	and x8, x9, #0x3
+	cmp x8, #1
+	b.ne .LBB1_3
+	add x8, x9, #2
 	mov x10, x9
 	casa x10, x8, [x0]
 	cmp x10, x9

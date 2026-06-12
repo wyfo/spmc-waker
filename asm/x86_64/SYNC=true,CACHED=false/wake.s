@@ -5,20 +5,10 @@ su_wake:
 	or rcx, 2
 	lock cmpxchg	qword ptr [rdi], rcx
 	jne .LBB1_1
-	mov ecx, eax
-	and ecx, 3
-	cmp ecx, 1
-	jne .LBB1_3
-	#MEMBARRIER
-	mov rdx, rax
-	dec rdx
-	mov rcx, qword ptr [rdi + 8]
-	xchg qword ptr [rdi], rdx
-	mov rdi, rcx
-	jmp qword ptr [rax + 7]
-.LBB1_3:
 	test al, 2
 	jne .LBB1_5
+	test al, 1
+	jne .LBB1_6
 	mov rcx, rax
 	add rcx, 2
 	mov rdx, rax
@@ -26,3 +16,11 @@ su_wake:
 	lock cmpxchg	qword ptr [rdi], rdx
 .LBB1_5:
 	ret
+.LBB1_6:
+	#MEMBARRIER
+	mov rdx, rax
+	dec rdx
+	mov rcx, qword ptr [rdi + 8]
+	xchg qword ptr [rdi], rdx
+	mov rdi, rcx
+	jmp qword ptr [rax + 7]

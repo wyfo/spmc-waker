@@ -3,9 +3,11 @@ uc_wake:
 	push rbx
 	push rax
 	mov rcx, qword ptr [rdi]
-	test cl, 1
-	je .LBB1_4
-	mov edx, 2
+	mov eax, ecx
+	and eax, 3
+	cmp eax, 1
+	jne .LBB1_4
+	lea rdx, [rcx + 2]
 	mov rax, rcx
 	lock cmpxchg	qword ptr [rdi], rdx
 	jne .LBB1_4

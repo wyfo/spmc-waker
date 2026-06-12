@@ -3,8 +3,10 @@ uc_wake:
 	stp x20, x19, [sp, #16]
 	mov x29, sp
 	ldar x8, [x0]
-	tbz w8, #0, .LBB1_4
-	mov w9, #2
+	and x9, x8, #0x3
+	cmp x9, #1
+	b.ne .LBB1_4
+	add x9, x8, #2
 	mov x10, x8
 	casa x10, x9, [x0]
 	cmp x10, x8

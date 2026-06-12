@@ -13,6 +13,7 @@
 extern crate std;
 use core::{
     convert::identity,
+    hint::assert_unchecked,
     mem::ManuallyDrop,
     panic::{RefUnwindSafe, UnwindSafe},
     ptr,
@@ -33,15 +34,21 @@ const _: () = assert!(core::mem::align_of::<RawWakerVTable>() >= 4);
 const REGISTERED: usize = 1;
 const WAKING: usize = 2;
 #[inline(always)]
-fn is_registered(vtable: *mut RawWakerVTable) -> bool {
-    vtable.addr() & (REGISTERED | WAKING) == REGISTERED
+fn is_registered(vtable: *const RawWakerVTable) -> bool {
+    vtable.addr() & REGISTERED != 0
+}
+#[inline(always)]
+fn is_waking(vtable: *const RawWakerVTable) -> bool {
+    vtable.addr() & WAKING != 0
+}
+#[inline(always)]
+fn is_empty(vtable: *const RawWakerVTable) -> bool {
+    // The compiler is able to optimize it to `vtable.addr() & (REGISTERED | WAKING) == 0`.
+    !is_registered(vtable) && !is_waking(vtable)
 }
 #[inline(always)]
 fn unregistered(vtable: *mut RawWakerVTable) -> *mut RawWakerVTable {
     vtable.map_addr(|addr| addr & !REGISTERED)
-}
-fn check_concurrent_wake(vtable: *mut RawWakerVTable) {
-    debug_assert!(vtable.addr() & WAKING != 0 || vtable.addr() & (REGISTERED | WAKING) == 0);
 }
 
 static NOOP_VTABLE: &RawWakerVTable = &RawWakerVTable::new(
@@ -235,10 +242,10 @@ impl<const SYNC: bool, const CACHED: bool> Drop for SpmcWaker<SYNC, CACHED> {
     #[inline]
     fn drop(&mut self) {
         let vtable = self.vtable.load_mut();
-        if CACHED || vtable.addr() & REGISTERED != 0 {
+        if CACHED || is_registered(vtable) {
             // SAFETY: there is a waker registered or cached, with no concurrent access
             // as per mutable reference
-            drop(unsafe { self.waker(vtable.map_addr(|addr| addr & !REGISTERED)) });
+            drop(unsafe { self.waker(unregistered(vtable)) });
         }
     }
 }
@@ -262,8 +269,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
     /// Waker data must be safe to read, i.e., no concurrent write shall happen.
     #[inline(always)]
     unsafe fn waker(&self, vtable: *const RawWakerVTable) -> Waker {
-        // A debug_assert here is better than a segfault without stacktrace in test.
-        debug_assert!(vtable.addr() & (REGISTERED | WAKING) == 0);
+        debug_assert!(is_empty(vtable));
         // SAFETY: as per function contract + data is always set together with vtable
         // so they form a valid waker.
         unsafe { Waker::new(self.data.get(), &*vtable) }
@@ -304,17 +310,17 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         // folded into the load. With CACHED=true, data is only modified
         // in `overwrite`, which emits its own fence.
         // Synchronization required by SYNC=true will be carried by
-        // the RMW used to set the vtable.
+        // the RMW used to set the vtable, or by a fence if early returning
+        // because of a concurrent `wake`.
         let ordering = if CACHED { Relaxed } else { Acquire };
         let mut vtable = self.vtable.load(ordering);
-        if !CACHED && vtable.addr() & (REGISTERED | WAKING) == 0 {
+        if !CACHED && is_empty(vtable) {
             let waker = ManuallyDrop::new(waker.clone());
             self.data.set(waker.data());
             vtable = ptr::from_ref(waker.vtable()).cast_mut();
             self.register_vtable(vtable, true)
         } else if CACHED
-            // No need to check vtable.addr() & (REGISTERED | WAKING) == 0
-            // as it is implied by vtable equality.
+            // No need to check `is_empty(vtable)` as it is implied by vtable equality.
             && ptr::from_ref(waker.vtable()) == vtable
             && waker.data() == self.data.get()
         {
@@ -345,7 +351,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         true
     }
 
-    // Overwriting a registered waker is expected to be rare, hence the `#[cold]` attribute.
+    // Overwriting a registered/cached waker is expected to be rare, hence the `#[cold]` attribute.
     #[cold]
     fn overwrite(&self, waker: &Waker, vtable: *mut RawWakerVTable) -> bool {
         // If the waker is already registered, there is no need to replace it,
@@ -355,15 +361,12 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         // but its pending `wake_by_ref` call targets this same waker, so the
         // task will be polled again — and that poll happens after the wake's
         // claim, so it cannot load the stale registration a second time.
-        if waker.data() == self.data.get()
-            && ptr::from_ref(waker.vtable()) == vtable.map_addr(|addr| addr & !REGISTERED)
+        if waker.data() == self.data.get() && ptr::from_ref(waker.vtable()) == unregistered(vtable)
         {
             return true;
         }
         // A concurrent `wake` may be happening.
-        // For some reason, checking the flag with SYNC=false compiles to better asm than
-        // `(SYNC && vtable.addr() & WAKING != 0) || (!SYNC && vtable.addr() == WAKING)`
-        if vtable.addr() & WAKING != 0 {
+        if is_waking(vtable) {
             // A thread is currently waking the registered waker, so we can
             // assume we should not wait and return immediately.
             // An Acquire fence is emitted with SYNC=true to synchronize with `wake`
@@ -388,7 +391,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
                 (self.vtable).swap(ptr::from_ref(NOOP_VTABLE).cast_mut(), SeqCst);
             }
         });
-        if vtable.addr() & REGISTERED != 0 {
+        if is_registered(vtable) {
             // Relaxed ordering is fine as it will be followed by a swap/store.
             // An Acquire fence is emitted in case of failure with SYNC=true
             // to synchronize with `wake`.
@@ -398,12 +401,12 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
                 if SYNC {
                     fence(Acquire);
                 }
-                check_concurrent_wake(vtable);
+                debug_assert!(is_waking(vtable) || is_empty(vtable));
                 guard.forget();
                 return false;
             }
             // SAFETY: No concurrent `register` can happen, so waker data is safe to access
-            drop(unsafe { self.waker(vtable.map_addr(|addr| addr & !REGISTERED)) });
+            drop(unsafe { self.waker(unregistered(vtable)) });
         } else if CACHED {
             // SAFETY: No concurrent `register` can happen, so waker data is safe to access
             drop(unsafe { self.waker(vtable) });
@@ -429,7 +432,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         #[cfg(all(debug_assertions, not(loom)))]
         let _guard = self.exclusive.check();
         let vtable = self.vtable.load(Relaxed);
-        if vtable.addr() & (REGISTERED | WAKING) != REGISTERED {
+        if !is_registered(vtable) || is_waking(vtable) {
             return false;
         }
         let unregistered = unregistered(vtable);
@@ -443,7 +446,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
                 drop(unsafe { self.waker(unregistered) });
                 true
             }
-            res => res.map_err(check_concurrent_wake).is_ok(),
+            res => res.is_ok(),
         }
     }
 
@@ -470,7 +473,10 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
             is_registered(self.vtable.load(Relaxed))
                 || is_registered(self.vtable.fetch_byte_add(0, Release))
         } else {
-            self.vtable.load(SeqCst).addr() & REGISTERED != 0
+            // Loading the vtable with SeqCst is necessary for the pattern
+            // `store X; load Y || store Y; load X` to not miss any
+            // notification, where X is the wake condition and Y the vtable.
+            is_registered(self.vtable.load(SeqCst))
         }
     }
 
@@ -518,7 +524,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
             // `store X; load Y || store Y; load X` to not miss any
             // notification, where X is the wake condition and Y the vtable.
             let vtable = self.vtable.load(SeqCst);
-            if vtable.addr() & REGISTERED == 0 {
+            if !is_registered(vtable) {
                 wake(None)
             } else if cold {
                 self.wake_unsync_cold(vtable, wake)
@@ -535,6 +541,8 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         unregister: impl Fn(*mut RawWakerVTable) -> U,
         wake: impl FnOnce(Option<Waker>) -> R,
     ) -> R {
+        // SAFETY: it has been tested before, but this assert helps compiler
+        unsafe { assert_unchecked(is_registered(vtable)) };
         let unregistered = unregistered(vtable);
         // SAFETY: The vtable WAKING flag has been set, so no waker can
         // be registered. For SYNC=false, `register` set vtable with SeqCst
@@ -571,7 +579,10 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         // access the data stored in `register`.
         let ordering = if registered { AcqRel } else { Release };
         let vtable = self.vtable.fetch_or(WAKING, ordering);
-        if is_registered(vtable) {
+        if is_waking(vtable) {
+            // A concurrent `wake` has won the race, just return.
+            wake(None)
+        } else if is_registered(vtable) {
             // There is a waker registered in the end, so emit the Acquire fence
             // not handled by previous `fetch_or`.
             if !registered {
@@ -587,9 +598,6 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
             // work as it might overwrite a potential fetch_or and prevent
             // the synchronization of a racing wake with the next register.
             self.unregister_and_wake(vtable, |vt| self.vtable.swap(vt, Release), wake)
-        } else if vtable.addr() & WAKING != 0 {
-            // A concurrent `wake` has won the race, just return.
-            wake(None)
         } else {
             // Too bad, no waker was registered. It means that a concurrent `register`
             // might be concurrently storing a waker and swap the vtable with a
@@ -620,7 +628,11 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         vtable: *mut RawWakerVTable,
         wake: impl FnOnce(Option<Waker>) -> R,
     ) -> R {
-        // Try swapping the vtable with WAKING. If it fails, it means either:
+        // If a concurrent `wake` is ongoing, just return.
+        if is_waking(vtable) {
+            return wake(None);
+        }
+        // Try setting the WAKING flag. If it fails, it means either:
         // - a concurrent `wake` has won the race
         // - the waker was overwritten, so the registering thread is supposed
         //   to check again its wakeup condition
@@ -632,7 +644,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         // as the following CAS in `register`/`unregister`/`wake` will then fail.
         // (It is also not an issue if `register` early returns true, as it is
         // the same as if `wake` was called after `register`)
-        let waking = ptr::without_provenance_mut(WAKING);
+        let waking = vtable.map_addr(|addr| addr | WAKING);
         if (self.vtable)
             .compare_exchange(vtable, waking, Acquire, Relaxed)
             .is_err()
