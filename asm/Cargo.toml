@@ -1,0 +1,15 @@
+[package]
+name = "spmc-waker-asm"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+spmc-waker = { path = ".." }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

@@ -489,6 +489,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         self.check_before_wake(true, Self::wake_waker);
     }
 
+    #[inline(always)]
     fn wake_waker(waker: Option<Waker>) {
         debug_assert!(waker.is_none() || !CACHED);
         if let Some(waker) = waker {
@@ -522,6 +523,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         }
     }
 
+    #[inline(always)]
     fn unregister_and_wake<R, U>(
         &self,
         vtable: *mut RawWakerVTable,
@@ -553,6 +555,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         }
     }
 
+    #[inline(always)]
     fn wake_sync<R>(&self, registered: bool, wake: impl FnOnce(Option<Waker>) -> R) -> R {
         // There might be a waker registered, set the WAKING bit with Release
         // ordering, so it can synchronize with the Acquire RMW in `register`.
@@ -606,6 +609,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         self.wake_sync(true, wake)
     }
 
+    #[inline(always)]
     fn wake_unsync<R>(
         &self,
         vtable: *mut RawWakerVTable,
@@ -666,6 +670,7 @@ impl<const SYNC: bool> SpmcWaker<SYNC, false> {
     /// atomic action.
     ///
     /// If a waker has not been registered, this returns `None`.
+    #[inline]
     pub fn take(&self) -> Option<Waker> {
         self.check_before_wake(false, identity)
     }

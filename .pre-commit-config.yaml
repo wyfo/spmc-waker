@@ -3,6 +3,7 @@ repos:
     rev: v1.40.0
     hooks:
       - id: typos
+        exclude: ^asm/
   - repo: local
     hooks:
       - id: fmt
@@ -21,6 +22,12 @@ repos:
         name: clippy-all-features
         entry: cargo clippy --all-features --all-targets -- -D warnings
         language: rust
+        pass_filenames: false
+        types_or: [rust, toml]
+      - id: asm
+        name: asm
+        entry: asm/check-asm.sh
+        language: script
         pass_filenames: false
         types_or: [rust, toml]
       - id: clippy-loom
