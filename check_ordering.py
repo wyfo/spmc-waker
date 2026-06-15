@@ -2,7 +2,6 @@
 """
 For each non-Relaxed memory ordering (and each fence) in src/lib.rs,
 mutate it one step weaker and run loom tests expecting a failure.
-Skips commented lines and lines containing NOOP_VTABLE.
 
 Usage: python check_ordering.py
 """
@@ -13,7 +12,9 @@ import sys
 
 FILE = "src/lib.rs"
 TEST_CMD = ["cargo", "test", "--release"]
-TEST_ENV = {**os.environ, "LOOM_MAX_PREEMPTIONS": "1", "RUSTFLAGS": "--cfg=loom"}
+BASE_ENV = {**os.environ, "RUSTFLAGS": "--cfg=loom"}
+# Try the cheap preemption bound first; escalate only if the mutant still passes.
+PREEMPTIONS = [1, 3]
 
 DOWNGRADE = {
     "SeqCst": ["AcqRel", "Acquire", "Release"],
@@ -29,7 +30,7 @@ def find_mutations(lines):
     """Yield (line_idx, start, end, old, new) for each mutation to test."""
     for i, line in enumerate(lines):
         stripped = line.lstrip()
-        if stripped.startswith("//") or "NOOP_VTABLE" in line or "!ORDERING" in line:
+        if stripped.startswith("//") or "!ORDERING" in line:
             continue
         if FENCE_RE.match(line):
             # Remove the fence statement by commenting it out
@@ -51,9 +52,10 @@ def apply(lines, line_idx, start, end, new):
     return mutant
 
 
-def run_loom():
+def run_loom(preemptions):
+    env = {**BASE_ENV, "LOOM_MAX_PREEMPTIONS": str(preemptions)}
     proc = subprocess.Popen(
-        TEST_CMD, env=TEST_ENV, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        TEST_CMD, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
     )
     for line in proc.stdout:
         if "FAILED" in line:
@@ -62,6 +64,15 @@ def run_loom():
             return True
     proc.wait()
     return proc.returncode != 0
+
+
+def detect_failure():
+    """Return the preemption bound at which the mutant fails, or None if it
+    passes even at the highest bound."""
+    for p in PREEMPTIONS:
+        if run_loom(p):
+            return p
+    return None
 
 
 def main():
@@ -86,8 +97,9 @@ def main():
             with open(FILE, "w") as f:
                 f.writelines(apply(lines, line_idx, start, end, new))
 
-            if run_loom():
-                print("FAIL ✓")
+            p = detect_failure()
+            if p is not None:
+                print(f"FAIL ✓ (preemptions={p})")
             else:
                 print("PASS ✗  <-- ordering may be unnecessary!")
                 unnecessary.append(desc)

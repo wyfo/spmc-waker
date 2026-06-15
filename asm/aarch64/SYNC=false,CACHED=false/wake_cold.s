@@ -1,5 +1,5 @@
-uu_wake_cold:
+asm_wake_cold_asm:
 	ldar x1, [x0]
-	tbnz w1, #0, .LBB1_2
+	tbnz w1, #0, .LBB15_2
 	ret
-	b spmc_waker::SpmcWaker<_,_>::wake_unsync_cold
+	b spmc_waker::SpmcWaker<_,_>::wake_registered_cold

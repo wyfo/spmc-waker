@@ -1,19 +1,24 @@
-su_unregister:
+asm_unregister_asm:
 	mov rcx, qword ptr [rdi]
 	mov eax, ecx
 	and eax, 3
 	cmp eax, 1
-	jne .LBB0_4
+	setne al
+	lea rdx, [rcx - 4]
+	cmp rdx, -8
+	setae dl
+	or dl, al
+	jne .LBB13_4
 	lea rdx, [rcx - 1]
 	mov rax, rcx
 	lock cmpxchg	qword ptr [rdi], rdx
-	jne .LBB0_4
+	jne .LBB13_4
 	push rax
 	mov rdi, qword ptr [rdi + 8]
 	call qword ptr [rcx + 23]
 	mov al, 1
 	add rsp, 8
 	ret
-.LBB0_4:
+.LBB13_4:
 	xor eax, eax
 	ret

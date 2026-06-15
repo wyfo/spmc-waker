@@ -15,6 +15,9 @@ pub(crate) mod sync {
         pub(crate) use portable_atomic::*;
 
         #[cfg(loom)]
+        use crate::loom::loom_trace;
+
+        #[cfg(loom)]
         fn seqcst_fence(order: Ordering) {
             if order == loom::sync::atomic::Ordering::SeqCst {
                 loom::sync::atomic::fence(order);
@@ -37,27 +40,40 @@ pub(crate) mod sync {
                 }
             }
 
+            #[track_caller]
             pub(crate) fn load(&self, order: Ordering) -> *mut T {
                 seqcst_fence(order);
-                core::ptr::with_exposed_provenance_mut(self.atomic.load(order))
+                let res: *mut T = core::ptr::with_exposed_provenance_mut(self.atomic.load(order));
+                loom_trace!("load({order:?}) -> {res:p}");
+                res
             }
 
+            #[track_caller]
             pub(in crate::loom) fn load_mut(&mut self) -> *mut T {
-                core::ptr::with_exposed_provenance_mut(self.atomic.with_mut(|x| *x))
+                let res: *mut T =
+                    core::ptr::with_exposed_provenance_mut(self.atomic.with_mut(|x| *x));
+                loom_trace!("load_mut() -> {res:p}");
+                res
             }
 
+            #[track_caller]
             pub(crate) fn store(&self, x: *mut T, order: Ordering) {
                 self.atomic.store(x.expose_provenance(), order);
                 seqcst_fence(order);
+                loom_trace!("store({x:p}, {order:?})");
             }
 
+            #[track_caller]
             pub(crate) fn swap(&self, x: *mut T, order: Ordering) -> *mut T {
                 seqcst_fence(order);
                 let res = self.atomic.swap(x.expose_provenance(), order);
                 seqcst_fence(order);
-                core::ptr::with_exposed_provenance_mut(res)
+                let res: *mut T = core::ptr::with_exposed_provenance_mut(res);
+                loom_trace!("swap({x:p}, {order:?}) -> {res:p}");
+                res
             }
 
+            #[track_caller]
             pub(crate) fn compare_exchange(
                 &self,
                 current: *mut T,
@@ -75,22 +91,23 @@ pub(crate) mod sync {
                 if res.is_ok() {
                     seqcst_fence(success);
                 }
-                res.map(core::ptr::with_exposed_provenance_mut)
-                    .map_err(core::ptr::with_exposed_provenance_mut)
+                let res = res
+                    .map(core::ptr::with_exposed_provenance_mut::<T>)
+                    .map_err(core::ptr::with_exposed_provenance_mut::<T>);
+                loom_trace!(
+                    "compare_exchange(cur={current:p}, new={new:p}, {success:?}/{failure:?}) -> {res:?}"
+                );
+                res
             }
 
+            #[track_caller]
             pub(crate) fn fetch_byte_add(&self, val: usize, order: Ordering) -> *mut T {
                 seqcst_fence(order);
                 let res = self.atomic.fetch_add(val, order);
                 seqcst_fence(order);
-                core::ptr::with_exposed_provenance_mut(res)
-            }
-
-            pub(crate) fn fetch_or(&self, val: usize, order: Ordering) -> *mut T {
-                seqcst_fence(order);
-                let res = self.atomic.fetch_or(val, order);
-                seqcst_fence(order);
-                core::ptr::with_exposed_provenance_mut(res)
+                let res: *mut T = core::ptr::with_exposed_provenance_mut(res);
+                loom_trace!("fetch_byte_add({val:#x}, {order:?}) -> {res:p}");
+                res
             }
         }
     }
@@ -109,3 +126,55 @@ impl<T> AtomicPtrExt<T> for sync::atomic::AtomicPtr<T> {
         return self.load_mut();
     }
 }
+
+#[cfg(loom)]
+pub(crate) mod trace {
+    extern crate std;
+    use std::{
+        fs::{File, OpenOptions},
+        sync::LazyLock,
+    };
+
+    const PATH: &str = "loom.trace";
+
+    /// Tracing is enabled at runtime by setting the `LOOM_TRACE` env var.
+    pub(crate) static ENABLED: LazyLock<bool> =
+        LazyLock::new(|| std::env::var_os("LOOM_TRACE").is_some());
+
+    pub(crate) static FILE: LazyLock<File> = LazyLock::new(|| {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(PATH)
+            .unwrap()
+    });
+
+    pub fn clear() {
+        if *ENABLED {
+            FILE.set_len(0).unwrap();
+        }
+    }
+}
+
+#[cfg(loom)]
+macro_rules! loom_trace {
+    ($($t:tt)*) => {
+        if *crate::loom::trace::ENABLED {
+            extern crate std;
+            use std::io::Write;
+            // Format the whole line first and append it with a single
+            // `write_all`: `O_APPEND` makes one small write atomic, so
+            // concurrent threads' lines don't tear (no lock needed).
+            let line = std::format!(
+                "[{:?}] {}: {}\n",
+                loom::thread::current().id(),
+                core::panic::Location::caller(),
+                format_args!($($t)*),
+            );
+            let _ = (&*crate::loom::trace::FILE).write_all(line.as_bytes());
+        }
+    };
+}
+
+#[cfg(loom)]
+pub(crate) use loom_trace;

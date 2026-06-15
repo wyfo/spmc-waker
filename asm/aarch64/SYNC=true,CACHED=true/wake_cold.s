@@ -1,7 +1,10 @@
-sc_wake_cold:
+asm_wake_cold_asm:
 	ldr x8, [x0]
-	tbnz w8, #0, .LBB1_3
-	ldsetl xzr, x8, [x0]
-	tbnz w8, #0, .LBB1_3
+	tbnz w8, #0, .LBB15_3
+	ldsetl xzr, x1, [x0]
+	tbnz w1, #0, .LBB15_4
 	ret
-	b spmc_waker::SpmcWaker<_,_>::wake_sync_cold
+	mov x1, x8
+	tst x8, #0x1
+	cset w2, eq
+	b spmc_waker::SpmcWaker<_,_>::wake_registered_cold

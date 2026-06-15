@@ -18,20 +18,20 @@ ARCHES=(
 
 # cfg prefix : directory label : cold wake helper
 VARIANTS=(
-    "sc:SYNC=true,CACHED=true:wake_sync_cold"
-    "su:SYNC=true,CACHED=false:wake_sync_cold"
-    "uc:SYNC=false,CACHED=true:wake_unsync_cold"
-    "uu:SYNC=false,CACHED=false:wake_unsync_cold"
+    "--cfg=sync --cfg=cached:SYNC=true,CACHED=true"
+    "--cfg=sync:SYNC=true,CACHED=false"
+    "--cfg=cached:SYNC=false,CACHED=true"
+    ":SYNC=false,CACHED=false"
 )
 
 # check_unit <arch> <target> <extra_flags> <dir> <cfg> <fn> <name>
 #   dir  - directory under <arch>/ where the .s file lives
 #   cfg  - the --cfg flag value, also used as the target dir key
 #   fn   - the symbol passed to `cargo asm`
-#   name - reference file base name within <arch>/<dir>/
+#   name - reference file base name within <arch>/<dir>/ (defaults to <fn>)
 # Runs as a backgrounded job, exits non-zero on failure.
 check_unit() {
-    local arch="$1" target="$2" extra="$3" dir="$4" cfg="$5" fn="$6" name="$7"
+    local arch="$1" target="$2" extra="$3" dir="$4" cfg="$5" fn="$6" name="${7:-$6}"
     local label="$arch/$dir/$name"
 
     # Each cfg gets its own target dir so parallel jobs don't contend on the
@@ -44,7 +44,7 @@ check_unit() {
     # first attempt so retries are cheap.
     local actual=""
     for _ in 1 2 3; do
-        actual=$(CARGO_TARGET_DIR=$tdir RUSTFLAGS="--cfg $cfg $extra" cargo asm --lib --target "$target" --simplify "$fn" 2>/dev/null) || true
+        actual=$(CARGO_TARGET_DIR=$tdir RUSTFLAGS="$cfg $extra" cargo asm --lib --target "$target" --simplify "$fn" 2>/dev/null) || true
         [[ -n "$actual" ]] && break
     done
 
@@ -75,26 +75,27 @@ for arch_entry in "${ARCHES[@]}"; do
     IFS=: read -r arch target extra <<< "$arch_entry"
 
     for variant_entry in "${VARIANTS[@]}"; do
-        IFS=: read -r pfx dir wake_cold_fn <<< "$variant_entry"
+        IFS=: read -r cfg dir <<< "$variant_entry"
 
         # ── hot-path functions ────────────────────────────────────────────
 
-        for op in wake wake_cold register unregister has_waker_registered; do
-            cfg="${pfx}_${op}"
-            check_unit "$arch" "$target" "$extra" "$dir" "$cfg" "$cfg" "$op" &
+        for op in wake wake_cold try_register register unregister poll_wait_until has_waker_registered; do
+            check_unit "$arch" "$target" "$extra" "$dir" "$cfg" "asm_${op}_asm" "$op" &
             pids+=("$!")
         done
 
         # ── cold helpers outlined from hot paths ─────────────────────────
 
-        # wake's outlined cold helper (same symbol for both wake and wake_cold)
-        check_unit "$arch" "$target" "$extra" "$dir" "${pfx}_wake" \
-            "$wake_cold_fn" "wake__${wake_cold_fn}" &
+        # wake's outlined cold helpers
+        check_unit "$arch" "$target" "$extra" "$dir" "$cfg" "wake_registered_cold" &
+        pids+=("$!")
+        check_unit "$arch" "$target" "$extra" "$dir" "$cfg" "wake_fallback" &
         pids+=("$!")
 
-        # register's outlined cold helper
-        check_unit "$arch" "$target" "$extra" "$dir" "${pfx}_register" \
-            "overwrite" "register__overwrite" &
+        check_unit "$arch" "$target" "$extra" "$dir" "$cfg" "register_cold" &
+        pids+=("$!")
+
+        check_unit "$arch" "$target" "$extra" "$dir" "$cfg" "register_fallback" &
         pids+=("$!")
     done
 

@@ -1,21 +1,20 @@
-su_register:
+asm_register_asm:
 	push rbx
-	mov rax, rsi
 	mov rbx, rdi
-	mov rcx, qword ptr [rdi]
-	mov rsi, qword ptr [rsi]
-	test cl, 3
-	jne .LBB1_2
-	mov rdi, qword ptr [rax + 8]
-	call qword ptr [rsi]
+	mov rdx, qword ptr [rdi]
+	test dl, 3
+	jne .LBB11_2
+	mov rax, qword ptr [rsi]
+	mov rdi, qword ptr [rsi + 8]
+	call qword ptr [rax]
 	mov qword ptr [rbx + 8], rdx
-	or rax, 1
+	inc rax
 	xchg qword ptr [rbx], rax
-	mov al, 1
 	pop rbx
 	ret
-.LBB1_2:
-	mov rdx, qword ptr [rax + 8]
+.LBB11_2:
 	mov rdi, rbx
+	mov ecx, 1
+	mov r8d, 1
 	pop rbx
-	jmp spmc_waker::SpmcWaker<_,_>::overwrite
+	jmp spmc_waker::SpmcWaker<_,_>::register_cold

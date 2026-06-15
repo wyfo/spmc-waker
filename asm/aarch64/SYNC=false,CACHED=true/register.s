@@ -1,18 +1,16 @@
-uc_register:
-	mov x9, x1
-	ldr x3, [x0]
-	ldr x1, [x1]
-	ldr x2, [x9, #8]
-	mov x8, x0
-	cmp x1, x3
-	b.ne .LBB1_3
-	ldr x9, [x8, #8]
-	cmp x2, x9
-	b.ne .LBB1_3
-	orr x9, x3, #0x1
-	mov w0, #1
-	stlr x9, [x8]
+asm_register_asm:
+	ldar x2, [x0]
+	ldr x8, [x1]
+	cmp x8, x2
+	b.ne .LBB11_3
+	ldr x9, [x1, #8]
+	ldr x10, [x0, #8]
+	cmp x9, x10
+	b.ne .LBB11_3
+	add x8, x8, #1
+	stlr x8, [x0]
 	ret
-.LBB1_3:
-	mov x0, x8
-	b spmc_waker::SpmcWaker<_,_>::overwrite
+.LBB11_3:
+	mov w3, #1
+	mov w4, #1
+	b spmc_waker::SpmcWaker<_,_>::register_cold

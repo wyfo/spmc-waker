@@ -1,151 +1,50 @@
-//! Compilation targets for asm inspection via `check-asm.sh`.
-//!
-//! Each cfg flag compiles exactly one entry point.  The function name matches
-//! the cfg flag so that `cargo asm --lib "$cfg"` finds it unambiguously.
-//!
-//! Variant naming:
-//!   sc = SpmcWaker<SYNC=true,  CACHED=true>  (the default)
-//!   su = SpmcWaker<SYNC=true,  CACHED=false>
-//!   uc = SpmcWaker<SYNC=false, CACHED=true>   (UnsynchronizedSpmcWaker)
-//!   uu = SpmcWaker<SYNC=false, CACHED=false>
-#![allow(unexpected_cfgs, unused_imports)]
-
 use core::task::Waker;
-use spmc_waker::SpmcWaker;
+use std::{
+    sync::atomic::{AtomicBool, Ordering::Relaxed},
+    task::{Context, Poll},
+};
 
-// ── sc: SpmcWaker<true, true> ────────────────────────────────────────────────
+#[allow(unexpected_cfgs)]
+const SYNC: bool = cfg!(sync);
+#[allow(unexpected_cfgs)]
+const CACHED: bool = cfg!(cached);
+type SpmcWaker = spmc_waker::SpmcWaker<SYNC, CACHED>;
 
-#[cfg(sc_wake)]
 #[unsafe(no_mangle)]
-pub fn sc_wake(w: &SpmcWaker<true, true>) {
-    w.wake()
+fn asm_wake_asm(spmc: &SpmcWaker) {
+    spmc.wake();
 }
 
-#[cfg(sc_wake_cold)]
 #[unsafe(no_mangle)]
-pub fn sc_wake_cold(w: &SpmcWaker<true, true>) {
-    w.wake_cold()
+fn asm_wake_cold_asm(spmc: &SpmcWaker) {
+    spmc.wake_cold();
 }
 
-#[cfg(sc_register)]
 #[unsafe(no_mangle)]
-pub unsafe fn sc_register(w: &SpmcWaker<true, true>, waker: &Waker) -> bool {
-    // SAFETY: caller must ensure no concurrent register/unregister
-    unsafe { w.register(waker) }
+unsafe fn asm_poll_wait_until_asm(
+    spmc: &SpmcWaker,
+    cx: &mut Context,
+    condition: &AtomicBool,
+) -> Poll<()> {
+    unsafe { spmc.poll_wait_until(cx, || condition.load(Relaxed)) }
 }
 
-#[cfg(sc_unregister)]
 #[unsafe(no_mangle)]
-pub unsafe fn sc_unregister(w: &SpmcWaker<true, true>) -> bool {
-    // SAFETY: caller must ensure no concurrent register/unregister
-    unsafe { w.unregister() }
+unsafe fn asm_try_register_asm(spmc: &SpmcWaker, waker: &Waker) -> bool {
+    unsafe { spmc.try_register(waker) }
 }
 
-#[cfg(sc_has_waker_registered)]
 #[unsafe(no_mangle)]
-pub fn sc_has_waker_registered(w: &SpmcWaker<true, true>) -> bool {
-    w.has_waker_registered()
+unsafe fn asm_register_asm(spmc: &SpmcWaker, waker: &Waker) {
+    unsafe { spmc.register(waker) }
 }
 
-// ── su: SpmcWaker<true, false> ───────────────────────────────────────────────
-
-#[cfg(su_wake)]
 #[unsafe(no_mangle)]
-pub fn su_wake(w: &SpmcWaker<true, false>) {
-    w.wake()
+unsafe fn asm_unregister_asm(spmc: &SpmcWaker) -> bool {
+    unsafe { spmc.unregister() }
 }
 
-#[cfg(su_wake_cold)]
 #[unsafe(no_mangle)]
-pub fn su_wake_cold(w: &SpmcWaker<true, false>) {
-    w.wake_cold()
+fn asm_has_waker_registered_asm(spmc: &SpmcWaker) -> bool {
+    spmc.has_waker_registered()
 }
-
-#[cfg(su_register)]
-#[unsafe(no_mangle)]
-pub unsafe fn su_register(w: &SpmcWaker<true, false>, waker: &Waker) -> bool {
-    // SAFETY: caller must ensure no concurrent register/unregister
-    unsafe { w.register(waker) }
-}
-
-#[cfg(su_unregister)]
-#[unsafe(no_mangle)]
-pub unsafe fn su_unregister(w: &SpmcWaker<true, false>) -> bool {
-    // SAFETY: caller must ensure no concurrent register/unregister
-    unsafe { w.unregister() }
-}
-
-#[cfg(su_has_waker_registered)]
-#[unsafe(no_mangle)]
-pub fn su_has_waker_registered(w: &SpmcWaker<true, false>) -> bool {
-    w.has_waker_registered()
-}
-
-// ── uc: SpmcWaker<false, true> ───────────────────────────────────────────────
-
-#[cfg(uc_wake)]
-#[unsafe(no_mangle)]
-pub fn uc_wake(w: &SpmcWaker<false, true>) {
-    w.wake()
-}
-
-#[cfg(uc_wake_cold)]
-#[unsafe(no_mangle)]
-pub fn uc_wake_cold(w: &SpmcWaker<false, true>) {
-    w.wake_cold()
-}
-
-#[cfg(uc_register)]
-#[unsafe(no_mangle)]
-pub unsafe fn uc_register(w: &SpmcWaker<false, true>, waker: &Waker) -> bool {
-    // SAFETY: caller must ensure no concurrent register/unregister
-    unsafe { w.register(waker) }
-}
-
-#[cfg(uc_unregister)]
-#[unsafe(no_mangle)]
-pub unsafe fn uc_unregister(w: &SpmcWaker<false, true>) -> bool {
-    // SAFETY: caller must ensure no concurrent register/unregister
-    unsafe { w.unregister() }
-}
-
-#[cfg(uc_has_waker_registered)]
-#[unsafe(no_mangle)]
-pub fn uc_has_waker_registered(w: &SpmcWaker<false, true>) -> bool {
-    w.has_waker_registered()
-}
-
-// ── uu: SpmcWaker<false, false> ──────────────────────────────────────────────
-
-#[cfg(uu_wake)]
-#[unsafe(no_mangle)]
-pub fn uu_wake(w: &SpmcWaker<false, false>) {
-    w.wake()
-}
-
-#[cfg(uu_wake_cold)]
-#[unsafe(no_mangle)]
-pub fn uu_wake_cold(w: &SpmcWaker<false, false>) {
-    w.wake_cold()
-}
-
-#[cfg(uu_register)]
-#[unsafe(no_mangle)]
-pub unsafe fn uu_register(w: &SpmcWaker<false, false>, waker: &Waker) -> bool {
-    // SAFETY: caller must ensure no concurrent register/unregister
-    unsafe { w.register(waker) }
-}
-
-#[cfg(uu_unregister)]
-#[unsafe(no_mangle)]
-pub unsafe fn uu_unregister(w: &SpmcWaker<false, false>) -> bool {
-    // SAFETY: caller must ensure no concurrent register/unregister
-    unsafe { w.unregister() }
-}
-
-#[cfg(uu_has_waker_registered)]
-#[unsafe(no_mangle)]
-pub fn uu_has_waker_registered(w: &SpmcWaker<false, false>) -> bool {
-    w.has_waker_registered()
-}
-
