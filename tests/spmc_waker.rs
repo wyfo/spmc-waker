@@ -677,10 +677,6 @@ fn fallback_waker_leaked_when_main_wake_panics<const SYNC: bool>(
     unsafe { Arc::decrement_strong_count(Arc::as_ptr(&fallback)) };
 }
 
-// When a fallback waker has been registered *and notified* (by a second `wake`) while the
-// main `wake` is in flight, the original `wake` adopts the fallback in `wake_fallback` and
-// invokes it. If that fallback waker's `wake_by_ref` panics, the subsequent `drop` is skipped
-// and the fallback waker is leaked.
 #[cfg(not(loom))]
 #[rstest]
 fn fallback_waker_leaked_when_fallback_wake_panics<const SYNC: bool>(

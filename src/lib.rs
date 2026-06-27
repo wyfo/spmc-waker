@@ -281,10 +281,10 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
     /// its safety condition. Basically, only a single thread should await a wake condition at a
     /// time.
     #[inline]
-    pub unsafe fn wait_until<C: FnMut() -> bool>(
+    pub unsafe fn wait_until<F: FnMut() -> bool>(
         &self,
-        wake_condition: C,
-    ) -> WaitUntil<'_, C, SYNC, CACHED> {
+        wake_condition: F,
+    ) -> WaitUntil<'_, F, SYNC, CACHED> {
         WaitUntil {
             wake: self,
             wake_condition,
@@ -329,43 +329,44 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
     /// All waker registration methods must not be called concurrently with each other from
     /// multiple threads.
     #[inline]
-    pub unsafe fn poll_wait_until<P: FnMut() -> bool>(
+    pub unsafe fn poll_wait_until<F: FnMut() -> W, W: WakeCondition>(
         &self,
         cx: &mut Context,
-        mut wake_condition: P,
-    ) -> Poll<()> {
+        mut wake_condition: F,
+    ) -> Poll<W::Output> {
         #[cfg(all(debug_assertions, not(loom)))]
         let _guard = self.exclusive.check();
         // Quick check to avoid registration if the wake condition is already met.
-        if wake_condition() {
-            return Poll::Ready(());
+        if let Some(out) = wake_condition().into_output() {
+            return Poll::Ready(out);
         }
         // Try registering the waker with fast path.
         match self.register_inlined(cx.waker()) {
             // Check the wake condition **after** registering the waker
             // to not miss any notification.
-            Ok(vtable) if wake_condition() => {
-                // Unregister the waker to avoid spurious wakeups.
-                self.unregister_inlined(vtable);
-                Poll::Ready(())
-            }
-            Ok(_) => Poll::Pending,
+            Ok(vtable) => match wake_condition().into_output() {
+                Some(out) => {
+                    self.unregister_inlined(vtable);
+                    Poll::Ready(out)
+                }
+                None => Poll::Pending,
+            },
             Err(vtable) => self.poll_wait_until_cold(cx.waker(), vtable, wake_condition),
         }
     }
 
     #[cold]
-    fn poll_wait_until_cold<P: FnMut() -> bool>(
+    fn poll_wait_until_cold<F: FnMut() -> W, W: WakeCondition>(
         &self,
         waker: &Waker,
         vtable: *mut RawWakerVTable,
-        mut wake_condition: P,
-    ) -> Poll<()> {
+        mut wake_condition: F,
+    ) -> Poll<W::Output> {
         // Try registering the waker.
         if !self.register_cold(waker, vtable, false, true) {
             // A concurrent wake is ongoing, the wake condition should be met.
-            if wake_condition() {
-                return Poll::Ready(());
+            if let Some(out) = wake_condition().into_output() {
+                return Poll::Ready(out);
             }
             // A previous wake didn't terminate, pause before retrying.
             spin_loop();
@@ -374,12 +375,12 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         }
         // Check the wake condition **after** registering the waker
         // to not miss any notification.
-        if wake_condition() {
+        if let Some(out) = wake_condition().into_output() {
             // Unregister the waker to avoid spurious wakeups.
             if let Some(vtable) = self.unregister_vtable() {
                 self.unregister_inlined(vtable);
             }
-            return Poll::Ready(());
+            return Poll::Ready(out);
         }
         Poll::Pending
     }
@@ -1067,20 +1068,39 @@ impl<const SYNC: bool, const CACHED: bool> Default for SpmcWaker<SYNC, CACHED> {
 /// ```
 pub type UnsynchronizedSpmcWaker<const CACHED: bool = true> = SpmcWaker<false, CACHED>;
 
-pub struct WaitUntil<'a, C, const SYNC: bool, const CACHED: bool> {
+pub struct WaitUntil<'a, F, const SYNC: bool, const CACHED: bool> {
     wake: &'a SpmcWaker<SYNC, CACHED>,
-    wake_condition: C,
+    wake_condition: F,
 }
 
-impl<C, const SYNC: bool, const CACHED: bool> Unpin for WaitUntil<'_, C, SYNC, CACHED> {}
+impl<F, const SYNC: bool, const CACHED: bool> Unpin for WaitUntil<'_, F, SYNC, CACHED> {}
 
-impl<C: FnMut() -> bool, const SYNC: bool, const CACHED: bool> Future
-    for WaitUntil<'_, C, SYNC, CACHED>
+impl<F: FnMut() -> W, W: WakeCondition, const SYNC: bool, const CACHED: bool> Future
+    for WaitUntil<'_, F, SYNC, CACHED>
 {
-    type Output = ();
+    type Output = W::Output;
     #[inline(always)]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // SAFETY: as per `SpmcWaker::wait_until` safety contract
         unsafe { self.wake.poll_wait_until(cx, || (self.wake_condition)()) }
+    }
+}
+
+pub trait WakeCondition {
+    type Output;
+    fn into_output(self) -> Option<Self::Output>;
+}
+
+impl WakeCondition for bool {
+    type Output = ();
+    fn into_output(self) -> Option<Self::Output> {
+        self.then_some(())
+    }
+}
+
+impl<T> WakeCondition for Option<T> {
+    type Output = T;
+    fn into_output(self) -> Option<Self::Output> {
+        self
     }
 }

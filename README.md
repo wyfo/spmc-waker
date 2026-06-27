@@ -26,9 +26,10 @@ Most of the time, there is a single task registering its waker, so the waker is 
 
 #### Progress guarantee
 
-Waker registration is wait-free, so are `SpmcWaker::poll_wait_until`, `SpmcWaker::register`, etc. while `SpmcWaker::wake` is lock-free.
+Waker registration is wait-free, while task waking is lock-free (without taking in account waker clone/wake/drop operations).
 
-When waker registration is only done with `SpmcWaker::try_register`, `SpmcWaker:wake` become wait-free, but registration then requires spinning until it succeeds, so it is not lock-free. This is by the way the workflow used by `AtomicWaker`, which reschedule the task as spinning mechanism.
+When waker registration is only done through `try_register`, `wake` becomes
+wait-free, but registration then requires spinning until it succeeds. This is by the way the workflow used by `AtomicWaker`, which reschedule the task as spinning mechanism.
 
 #### Cold path outlining
 
