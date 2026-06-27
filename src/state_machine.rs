@@ -7,7 +7,7 @@
 //! - NULL (`N`)             = `0`
 //! - READ_FALLBACK (`RF`)   = `usize::MAX & !REGISTERED & !WAKING`
 //!
-//! States can modified by 3 different threads:
+//! States can be modified by 3 different threads:
 //! - `RT` => registering thread
 //! - `WT` => waking thread
 //! - `NT` => notifier thread, i.e., concurrent thread which notify the waking
@@ -107,8 +107,8 @@
 //! | `RF\|R`       | `RF\|R -> N -> ...`<br>`RF\|R -> V\|R -> ...`                            |
 //! | `N\|R`        | `N\|R -> N -> ...`<br>`N\|R -> N\|R\|W -> ...`<br>`N\|R -> RF\|R -> ...` |
 //!
-//! Each initial state reach a final state without cycles, so the operation is wait-free
-//! (without taking in account waker operations)
+//! Each initial state reach a final state in a bounded number of transitions,
+//! so the operation is wait-free (without taking in account waker operations).
 //!
 //! ### wake
 //!

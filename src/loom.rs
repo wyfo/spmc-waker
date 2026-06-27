@@ -149,6 +149,7 @@ pub(crate) mod trace {
             .unwrap()
     });
 
+    /// Clears loom trace file.
     pub fn clear() {
         if *ENABLED {
             FILE.set_len(0).unwrap();

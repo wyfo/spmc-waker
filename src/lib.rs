@@ -7,6 +7,7 @@
 //!
 //! - `portable-atomic`: use `portable-atomic` crate to provide functionality to
 //!   targets without atomics.
+#![warn(missing_docs)]
 #![warn(clippy::undocumented_unsafe_blocks)]
 #![no_std]
 #[cfg(doc)]
@@ -49,7 +50,7 @@ pub use crate::loom::trace::clear as clear_loom_trace;
 ///
 /// `SpmcWaker` allows registering a task's [`Waker`] and waking the task atomically and
 /// concurrently from multiple threads. A single instance may be reused for any number of
-/// waker registration/call.
+/// waker registrations/calls.
 ///
 /// `SpmcWaker` should be paired with a wake condition, met **before** waking the
 /// task, and checked **after** registering the task's waker to not miss a concurrent
@@ -81,7 +82,7 @@ pub use crate::loom::trace::clear as clear_loom_trace;
 /// Calling `register` "acquires" all memory "released" by calls to `wake` before
 /// the call to `register`. Later calls to `wake` will wake the registered waker.
 ///
-/// As a consequence, if wake condition is atomic, it can accessed with [`Relaxed`] ordering.
+/// As a consequence, if wake condition is atomic, it can be accessed with [`Relaxed`] ordering.
 ///
 /// ### `SYNC=false` (aliased to [`UnsynchronizedSpmcWaker`])
 ///
@@ -128,7 +129,7 @@ pub use crate::loom::trace::clear as clear_loom_trace;
 /// # Progress guarantee
 ///
 /// Waker registration is wait-free, while task waking is lock-free (without taking
-/// in account waker clone/wake/drop operations).
+/// into account waker clone/wake/drop operations).
 ///
 /// When waker registration is only done through `try_register`, `wake` becomes
 /// wait-free, but registration then requires spinning until it succeeds.
@@ -272,7 +273,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
 
     /// Wait until the given wake condition is met.
     ///
-    /// Notifier threads should call [`wake`](Self::wake) (or [`wake_cold`](Self::wake))
+    /// Notifier threads should call [`wake`](Self::wake) (or [`wake_cold`](Self::wake_cold))
     /// after wake condition is met.
     ///
     /// # Safety
@@ -281,7 +282,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
     /// its safety condition. Basically, only a single thread should await a wake condition at a
     /// time.
     #[inline]
-    pub unsafe fn wait_until<F: FnMut() -> bool>(
+    pub unsafe fn wait_until<F: FnMut() -> W, W: WakeCondition>(
         &self,
         wake_condition: F,
     ) -> WaitUntil<'_, F, SYNC, CACHED> {
@@ -294,7 +295,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
     /// Returns `Poll::Ready` if the wake condition is met, or registers
     /// the task's waker to be notified.
     ///
-    /// Notifier threads should call [`wake`](Self::wake) (or [`wake_cold`](Self::wake))
+    /// Notifier threads should call [`wake`](Self::wake) (or [`wake_cold`](Self::wake_cold))
     /// after wake condition is met.
     ///
     /// It is equivalent to the following code (but more optimized):
@@ -316,7 +317,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
     /// }
     /// // check the wake condition **after** registering the waker
     /// // to not miss any notification
-    /// if self.wake_condition() {
+    /// if wake_condition() {
     ///     // unregister the waker to avoid spurious wakeups
     ///     self.unregister();
     ///     return Poll::Ready(());
@@ -337,14 +338,14 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         #[cfg(all(debug_assertions, not(loom)))]
         let _guard = self.exclusive.check();
         // Quick check to avoid registration if the wake condition is already met.
-        if let Some(out) = wake_condition().into_output() {
+        if let Some(out) = wake_condition().try_into_output() {
             return Poll::Ready(out);
         }
         // Try registering the waker with fast path.
         match self.register_inlined(cx.waker()) {
             // Check the wake condition **after** registering the waker
             // to not miss any notification.
-            Ok(vtable) => match wake_condition().into_output() {
+            Ok(vtable) => match wake_condition().try_into_output() {
                 Some(out) => {
                     self.unregister_inlined(vtable);
                     Poll::Ready(out)
@@ -365,7 +366,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         // Try registering the waker.
         if !self.register_cold(waker, vtable, false, true) {
             // A concurrent wake is ongoing, the wake condition should be met.
-            if let Some(out) = wake_condition().into_output() {
+            if let Some(out) = wake_condition().try_into_output() {
                 return Poll::Ready(out);
             }
             // A previous wake didn't terminate, pause before retrying.
@@ -375,7 +376,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         }
         // Check the wake condition **after** registering the waker
         // to not miss any notification.
-        if let Some(out) = wake_condition().into_output() {
+        if let Some(out) = wake_condition().try_into_output() {
             // Unregister the waker to avoid spurious wakeups.
             if let Some(vtable) = self.unregister_vtable() {
                 self.unregister_inlined(vtable);
@@ -444,11 +445,11 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         let vtable = self.vtable.load(Acquire);
         if !CACHED && !vtable.has(REGISTERED | WAKING) {
             Ok(self.register_vtable(&ManuallyDrop::new(waker.clone()), true))
-        // No need to check `is_empty(vtable)` as it is implied by vtable equality.
+        // No need to check `!vtable.has(REGISTERED | WAKING)` as it is implied by vtable equality.
         } else if CACHED
             && waker.vtable_ptr() == vtable
-            // SAFETY: vtable is unregistered, so its Acquire load cannot be stale
-            // and synchronize with previous accesses
+            // SAFETY: vtable is unregistered, so its Acquire load cannot be stale,
+            // so it synchronizes with previous accesses
             && waker.data() == unsafe { self.data.read() }
         {
             Ok(self.register_vtable(waker, false))
@@ -460,8 +461,8 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
     #[inline(always)]
     fn register_vtable(&self, waker: &Waker, set_data: bool) -> *mut RawWakerVTable {
         if set_data {
-            // SAFETY: vtable is unregistered, so its Acquire load cannot be stale
-            // and synchronize with previous accesses
+            // SAFETY: vtable is unregistered, so its Acquire load cannot be stale,
+            // so it synchronizes with previous accesses
             unsafe { self.data.write(waker.data()) };
         }
         let registered = waker.vtable_ptr().set(REGISTERED);
@@ -502,8 +503,8 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         // claim, so it cannot load the stale registration a second time.
         if clone
             && waker.vtable_ptr().set(REGISTERED) == vtable
-            // SAFETY: vtable is registered, so its Acquire load cannot be stale
-            // and synchronize with previous accesses
+            // SAFETY: vtable is registered, so its Acquire load cannot be stale,
+            // so it synchronizes with previous accesses
             && waker.data() == unsafe { self.data.read() }
         {
             return true;
@@ -535,7 +536,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
                 }
                 // `wake` is done, but the waker must still be overwritten, so the cached waker
                 // must be dropped. It's not possible to reuse it as the first check of the
-                // function would have return true in that case.
+                // function would have returned true in that case.
                 // SAFETY: No concurrent `register` can happen, and there is no fallback waker
                 // registered, so `wake` can't modify data
                 Err(vtable) if CACHED => _waker_to_drop = Some(unsafe { self.waker(vtable) }),
@@ -543,7 +544,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
                     debug_assert!(!is_fallback(vtable) && !vtable.has(REGISTERED | WAKING));
                 }
             }
-        // Cached waker will be overridden and must be dropped
+        // Cached waker will be overwritten and must be dropped
         } else if CACHED {
             // SAFETY: No concurrent `register` can happen, and there is no fallback waker
             // registered, so `wake` can't modify data
@@ -576,10 +577,9 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         };
         let mut _waker_to_drop = None;
         // If there already is a fallback waker registered, vtable must be reset to NULL
-        // to reset it and prevent the current one to be concurrently read.
+        // to reset it and prevent the current one from being concurrently read.
         if is_fallback(vtable) {
-            // This loop is not unbounded as per the state machine
-            // bounded number of transitions until exit condition.
+            // The loop is bounded, because `register` is wait-free.
             loop {
                 debug_assert!(vtable.has(REGISTERED) || vtable.has(REGISTERED | WAKING));
                 // Relaxed is fine for success, as there is nothing to synchronize with.
@@ -590,7 +590,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
                     Ok(_) => break,
                     Err(v) if is_fallback(v) => vtable = v,
                     // CAS failed with a valid vtable pointer, so no fallback waker
-                    // is registered passed this point. The main waker can be overwritten.
+                    // is registered past this point. The main waker can be overwritten.
                     // The recursion is finite, because `register` is wait-free.
                     Err(v) => return self.register_cold(waker, v, true, false),
                 }
@@ -707,7 +707,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         }
     }
 
-    /// Consumes the last `Waker` registered and wake its task.
+    /// Consumes the last `Waker` registered and wakes its task.
     ///
     /// If `register` has not been called yet, then this does nothing.
     #[inline]
@@ -789,7 +789,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
             }
             // Setting the flag fails because the waker has already been consumed.
             // There is no interest in retrying, as the wake condition should already
-            // been met, so it will be checked successfully after registering the
+            // have been met, so it will be checked successfully after registering the
             // next waker.
             return;
         }
@@ -846,7 +846,7 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
         waker: ManuallyDrop<Waker>,
         mut wake: impl FnMut(Waker),
     ) {
-        // A fallback waker has been registered, and may be registered again or waken concurrently.
+        // A fallback waker has been registered, and may be registered again or woken concurrently.
         loop {
             // `register` tries acquiring the fallback waker to overwrite it.
             // We don't have to wait for it to complete and can just reset the vtable,
@@ -949,8 +949,6 @@ impl<const SYNC: bool, const CACHED: bool> SpmcWaker<SYNC, CACHED> {
 
 impl<const SYNC: bool> SpmcWaker<SYNC, true> {
     /// Applies the given function to the last `Waker` passed to `register`.
-    ///
-    /// If a waker has not been registered, this returns `None`.
     #[inline]
     pub fn wake_with<W: FnMut(&Waker)>(&self, mut wake: W) {
         self.check_registered_and_wake(false, move |w| wake(&ManuallyDrop::new(w)));
@@ -968,8 +966,6 @@ impl<const SYNC: bool> SpmcWaker<SYNC, true> {
 
 impl<const SYNC: bool> SpmcWaker<SYNC, false> {
     /// Applies the given function to the last `Waker` passed to `register`.
-    ///
-    /// If a waker has not been registered, this returns `None`.
     #[inline]
     pub fn wake_with<W: FnMut(Waker)>(&self, wake: W) {
         self.check_registered_and_wake(false, wake);
@@ -1068,6 +1064,7 @@ impl<const SYNC: bool, const CACHED: bool> Default for SpmcWaker<SYNC, CACHED> {
 /// ```
 pub type UnsynchronizedSpmcWaker<const CACHED: bool = true> = SpmcWaker<false, CACHED>;
 
+/// Future returned by [`SpmcWaker::wait_until`]
 pub struct WaitUntil<'a, F, const SYNC: bool, const CACHED: bool> {
     wake: &'a SpmcWaker<SYNC, CACHED>,
     wake_condition: F,
@@ -1086,21 +1083,27 @@ impl<F: FnMut() -> W, W: WakeCondition, const SYNC: bool, const CACHED: bool> Fu
     }
 }
 
+/// Wake condition returned by closure passed in [`SpmcWaker::wait_until`].
+///
+/// Typically implemented by `bool` and `Option<T>`. When met, it provides
+/// an output that can be returned by `wait_until`.
 pub trait WakeCondition {
+    /// Wake condition output when met.
     type Output;
-    fn into_output(self) -> Option<Self::Output>;
+    /// Try getting the wake condition output, thereby checking if it is met.
+    fn try_into_output(self) -> Option<Self::Output>;
 }
 
 impl WakeCondition for bool {
     type Output = ();
-    fn into_output(self) -> Option<Self::Output> {
+    fn try_into_output(self) -> Option<Self::Output> {
         self.then_some(())
     }
 }
 
 impl<T> WakeCondition for Option<T> {
     type Output = T;
-    fn into_output(self) -> Option<Self::Output> {
+    fn try_into_output(self) -> Option<Self::Output> {
         self
     }
 }

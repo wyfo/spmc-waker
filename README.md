@@ -26,7 +26,7 @@ Most of the time, there is a single task registering its waker, so the waker is 
 
 #### Progress guarantee
 
-Waker registration is wait-free, while task waking is lock-free (without taking in account waker clone/wake/drop operations).
+Waker registration is wait-free, while task waking is lock-free (without taking into account waker clone/wake/drop operations).
 
 When waker registration is only done through `try_register`, `wake` becomes
 wait-free, but registration then requires spinning until it succeeds. This is by the way the workflow used by `AtomicWaker`, which reschedule the task as spinning mechanism.
