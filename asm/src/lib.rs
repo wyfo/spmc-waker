@@ -31,7 +31,7 @@ unsafe fn asm_poll_wait_until_asm(
     cx: &mut Context,
     condition: &AtomicBool,
 ) -> Poll<()> {
-    unsafe { spmc.poll_wait_until(cx, || condition.load(Relaxed)) }
+    unsafe { spmc.poll_wait_until(cx, |_| condition.load(Relaxed)) }
 }
 
 #[unsafe(no_mangle)]
