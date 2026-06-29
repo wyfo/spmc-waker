@@ -106,6 +106,7 @@ impl private::Synchronization for Sequential {
 /// thus a read-only operation with minimal contention on `SpmcWaker` cache-line.
 ///
 /// [`wake`]: crate::SpmcWaker::wake
+/// [`register`]: crate::SpmcWaker::register
 #[derive(Debug)]
 pub struct Unsynchronized;
 impl Synchronization for Unsynchronized {}
