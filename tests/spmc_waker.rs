@@ -476,17 +476,14 @@ fn unsynchronized_cached_reregister_synchronizes_data() {
     });
 }
 
-// From futures test suite
+// From futures test suite, only tested with SYNC because it requires internal synchronization
 #[cfg(not(loom))]
 #[rstest]
-fn basic<S: Synchronization, const RMW: bool, const CACHED: bool>(
-    #[values(SYNC, SEQ, UNSYNC, UNSYNC_RMW)] _sync: SyncMode<S, RMW>,
+fn basic<const CACHED: bool>(
     #[values(FALSE, TRUE)] _cached: Bool<CACHED>,
     #[values(WakeMode::Normal, WakeMode::Cold, WakeMode::CheckBefore)] wake_mode: WakeMode,
-) where
-    SyncMode<S, RMW>: WakeConditionAccess,
-{
-    let atomic_waker = Arc::new(SpmcWaker::<S, CACHED>::new());
+) {
+    let atomic_waker = Arc::new(SpmcWaker::<Synchronized, CACHED>::new());
     let atomic_waker_copy = atomic_waker.clone();
 
     let returned_pending = Arc::new(AtomicUsize::new(0));
@@ -500,7 +497,7 @@ fn basic<S: Synchronization, const RMW: bool, const CACHED: bool>(
 
         block_on(poll_fn(move |cx| {
             // the waking condition is not checked after registration so registered=true is passed
-            if SyncMode::<S, RMW>::get(&woken_copy, true) == 1 {
+            if woken_copy.load(Relaxed) == 1 {
                 Poll::Ready(())
             } else {
                 // Assert we return pending exactly once
@@ -520,7 +517,7 @@ fn basic<S: Synchronization, const RMW: bool, const CACHED: bool>(
     // give spawned thread some time to sleep in `block_on`
     thread::yield_now();
 
-    SyncMode::<S, RMW>::add(&woken, 1);
+    woken.store(1, Relaxed);
     atomic_waker.wake2(wake_mode);
 
     t.join().unwrap();
