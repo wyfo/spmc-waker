@@ -1,24 +1,29 @@
 use std::{
     future::poll_fn,
+    marker::PhantomData,
     ptr,
     sync::{
         Arc,
         atomic::{
             AtomicBool,
-            Ordering::{Relaxed, SeqCst},
+            Ordering::{Acquire, Relaxed, Release, SeqCst},
         },
     },
     task::{Context, Poll, RawWaker, RawWakerVTable, Wake, Waker},
 };
 #[cfg(not(loom))]
-use std::{panic::catch_unwind, sync::atomic::AtomicUsize, thread};
+use std::{
+    panic::catch_unwind,
+    sync::atomic::{AtomicUsize, fence},
+    thread,
+};
 
 #[cfg(not(loom))]
 use futures::executor::block_on;
 #[cfg(loom)]
-use loom::sync::atomic::AtomicUsize;
+use loom::sync::atomic::{AtomicUsize, fence};
 use rstest::rstest;
-use spmc_waker::SpmcWaker;
+use spmc_waker::{Sequential, SpmcWaker, Synchronization, Synchronized, Unsynchronized};
 
 #[cfg(loom)]
 fn model(f: impl Fn() + Sync + Send + 'static) {
@@ -107,6 +112,61 @@ fn block_on<F: Future>(f: F) -> F::Output {
     }))
 }
 
+struct SyncMode<S: Synchronization, const RMW: bool = false>(PhantomData<S>);
+const SYNC: SyncMode<Synchronized> = SyncMode(PhantomData);
+const SEQ: SyncMode<Sequential> = SyncMode(PhantomData);
+const UNSYNC: SyncMode<Unsynchronized> = SyncMode(PhantomData);
+const UNSYNC_RMW: SyncMode<Unsynchronized, true> = SyncMode(PhantomData);
+
+trait WakeConditionAccess {
+    fn add(c: &AtomicUsize, v: usize);
+    fn get(c: &AtomicUsize, registered: bool) -> usize;
+}
+impl WakeConditionAccess for SyncMode<Synchronized> {
+    fn add(c: &AtomicUsize, v: usize) {
+        c.fetch_add(v, Relaxed);
+    }
+    fn get(c: &AtomicUsize, _registered: bool) -> usize {
+        c.load(Relaxed)
+    }
+}
+impl WakeConditionAccess for SyncMode<Sequential> {
+    fn add(c: &AtomicUsize, v: usize) {
+        c.fetch_add(v, SeqCst);
+    }
+    fn get(c: &AtomicUsize, registered: bool) -> usize {
+        if registered {
+            c.load(SeqCst)
+        } else {
+            c.load(Relaxed)
+        }
+    }
+}
+impl WakeConditionAccess for SyncMode<Unsynchronized, false> {
+    fn add(c: &AtomicUsize, v: usize) {
+        c.fetch_add(v, Relaxed);
+        fence(SeqCst);
+    }
+    fn get(c: &AtomicUsize, registered: bool) -> usize {
+        if registered {
+            fence(SeqCst);
+        }
+        c.load(Relaxed)
+    }
+}
+impl WakeConditionAccess for SyncMode<Unsynchronized, true> {
+    fn add(c: &AtomicUsize, v: usize) {
+        c.fetch_add(v, Acquire);
+    }
+    fn get(c: &AtomicUsize, registered: bool) -> usize {
+        if registered {
+            c.fetch_add(0, Release)
+        } else {
+            c.load(Relaxed)
+        }
+    }
+}
+
 struct Bool<const BOOL: bool>;
 const TRUE: Bool<true> = Bool::<true>;
 const FALSE: Bool<false> = Bool::<false>;
@@ -125,31 +185,31 @@ enum WakeMode {
     CheckBefore,
 }
 
-trait Ext {
+trait PollWaitUntilExt {
     unsafe fn poll_wait_until2(
         &self,
         cx: &mut Context,
-        predicate: impl FnMut() -> bool,
+        predicate: impl FnMut(bool) -> bool,
         mode: WaitUntilMode,
     ) -> Poll<()>;
     fn wake2(&self, mode: WakeMode);
 }
 
-impl<const SYNC: bool, const CACHED: bool> Ext for SpmcWaker<SYNC, CACHED> {
+impl<S: Synchronization, const CACHED: bool> PollWaitUntilExt for SpmcWaker<S, CACHED> {
     unsafe fn poll_wait_until2(
         &self,
         cx: &mut Context,
-        mut predicate: impl FnMut() -> bool,
+        mut predicate: impl FnMut(bool) -> bool,
         mode: WaitUntilMode,
     ) -> Poll<()> {
         match mode {
             WaitUntilMode::Normal => unsafe { self.poll_wait_until(cx, predicate) },
             WaitUntilMode::TryRegisterOnly => {
-                if predicate() {
+                if predicate(false) {
                     return Poll::Ready(());
                 }
                 let registered = unsafe { self.try_register(cx.waker()) };
-                if predicate() {
+                if predicate(registered) {
                     unsafe { self.unregister() };
                     return Poll::Ready(());
                 } else if !registered {
@@ -160,11 +220,11 @@ impl<const SYNC: bool, const CACHED: bool> Ext for SpmcWaker<SYNC, CACHED> {
                 Poll::Pending
             }
             WaitUntilMode::RegisterOnly => {
-                if predicate() {
+                if predicate(false) {
                     return Poll::Ready(());
                 }
                 unsafe { self.register(cx.waker()) };
-                if predicate() {
+                if predicate(true) {
                     unsafe { self.unregister() };
                     return Poll::Ready(());
                 }
@@ -254,8 +314,8 @@ impl Wake for CounterWaker {
     }
 }
 
-fn concurrent_try_register_and_wake<const SYNC: bool, const CACHED: bool>(
-    spmc: SpmcWaker<SYNC, CACHED>,
+fn concurrent_try_register_and_wake<S: Synchronization, const CACHED: bool>(
+    spmc: SpmcWaker<S, CACHED>,
     waker: &Arc<CounterWaker>,
     wake_mode: WakeMode,
 ) {
@@ -275,26 +335,26 @@ fn concurrent_try_register_and_wake<const SYNC: bool, const CACHED: bool>(
 }
 
 #[rstest]
-fn concurrent_try_register_empty_and_wake<const SYNC: bool, const CACHED: bool>(
-    #[values(FALSE, TRUE)] _sync: Bool<SYNC>,
+fn concurrent_try_register_empty_and_wake<S: Synchronization, const CACHED: bool>(
+    #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
     #[values(FALSE, TRUE)] _cached: Bool<CACHED>,
     #[values(WakeMode::Normal, WakeMode::Cold, WakeMode::CheckBefore)] wake_mode: WakeMode,
 ) {
     model(move || {
-        let spmc = SpmcWaker::<SYNC, CACHED>::new();
+        let spmc = SpmcWaker::<S, CACHED>::new();
         let waker = CounterWaker::new();
         concurrent_try_register_and_wake(spmc, &waker, wake_mode);
     });
 }
 
 #[rstest]
-fn concurrent_try_register_overwrite_and_wake<const SYNC: bool, const CACHED: bool>(
-    #[values(FALSE, TRUE)] _sync: Bool<SYNC>,
+fn concurrent_try_register_overwrite_and_wake<S: Synchronization, const CACHED: bool>(
+    #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
     #[values(FALSE, TRUE)] _cached: Bool<CACHED>,
     #[values(WakeMode::Normal, WakeMode::Cold, WakeMode::CheckBefore)] wake_mode: WakeMode,
 ) {
     model(move || {
-        let spmc = SpmcWaker::<SYNC, CACHED>::new();
+        let spmc = SpmcWaker::<S, CACHED>::new();
         let waker = CounterWaker::new();
         unsafe { spmc.register(Waker::noop()) };
         concurrent_try_register_and_wake(spmc, &waker, wake_mode);
@@ -302,13 +362,13 @@ fn concurrent_try_register_overwrite_and_wake<const SYNC: bool, const CACHED: bo
 }
 
 #[rstest]
-fn concurrent_unregister_and_wake<const SYNC: bool, const CACHED: bool>(
-    #[values(FALSE, TRUE)] _sync: Bool<SYNC>,
+fn concurrent_unregister_and_wake<S: Synchronization, const CACHED: bool>(
+    #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
     #[values(FALSE, TRUE)] _cached: Bool<CACHED>,
     #[values(WakeMode::Normal, WakeMode::Cold, WakeMode::CheckBefore)] wake_mode: WakeMode,
 ) {
     model(move || {
-        let spmc = SpmcWaker::<SYNC, CACHED>::new();
+        let spmc = SpmcWaker::<S, CACHED>::new();
         let waker = Arc::<CounterWaker>::default();
         unsafe { spmc.register(&waker.waker()) };
         let unregistered = thread::scope(|s| {
@@ -327,13 +387,13 @@ fn concurrent_unregister_and_wake<const SYNC: bool, const CACHED: bool>(
 }
 
 #[rstest]
-fn concurrent_overwrite_and_wake<const SYNC: bool, const CACHED: bool>(
-    #[values(FALSE, TRUE)] _sync: Bool<SYNC>,
+fn concurrent_overwrite_and_wake<S: Synchronization, const CACHED: bool>(
+    #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
     #[values(FALSE, TRUE)] _cached: Bool<CACHED>,
     #[values(WakeMode::Normal, WakeMode::Cold, WakeMode::CheckBefore)] wake_mode: WakeMode,
 ) {
     model(move || {
-        let spmc = SpmcWaker::<SYNC, CACHED>::new();
+        let spmc = SpmcWaker::<S, CACHED>::new();
         let waker1 = CounterWaker::new();
         let waker2 = CounterWaker::new();
         unsafe { spmc.register(&waker1.waker()) };
@@ -346,13 +406,13 @@ fn concurrent_overwrite_and_wake<const SYNC: bool, const CACHED: bool>(
 }
 
 #[rstest]
-fn concurrent_register_and_wake<const SYNC: bool, const CACHED: bool>(
-    #[values(FALSE, TRUE)] _sync: Bool<SYNC>,
+fn concurrent_register_and_wake<S: Synchronization, const CACHED: bool>(
+    #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
     #[values(FALSE, TRUE)] _cached: Bool<CACHED>,
     #[values(WakeMode::Normal, WakeMode::Cold, WakeMode::CheckBefore)] wake_mode: WakeMode,
 ) {
     model(move || {
-        let spmc = SpmcWaker::<SYNC, CACHED>::new();
+        let spmc = SpmcWaker::<S, CACHED>::new();
         let waker = CounterWaker::new();
         thread::scope(|s| {
             s.spawn(|| spmc.wake2(wake_mode));
@@ -370,7 +430,7 @@ fn register_synchronizes_with_wake<const CACHED: bool>(
     #[values(false, true)] same_waker: bool,
 ) {
     model(move || {
-        let spmc = SpmcWaker::<true, CACHED>::new();
+        let spmc = SpmcWaker::<Synchronized, CACHED>::new();
         let condition = AtomicUsize::new(0);
         let waker = CounterWaker::new().waker();
         let other_waker = if same_waker {
@@ -400,16 +460,33 @@ fn register_synchronizes_with_wake<const CACHED: bool>(
     });
 }
 
+// Ensure that
+#[test]
+fn unsynchronized_cached_reregister_synchronizes_data() {
+    model(|| {
+        let spmc = SpmcWaker::<Unsynchronized, true>::new();
+        thread::scope(|s| {
+            s.spawn(|| {
+                unsafe { spmc.register(Waker::noop()) };
+                unsafe { spmc.unregister() };
+                unsafe { spmc.register(Waker::noop()) };
+            });
+            s.spawn(|| spmc.wake());
+        });
+    });
+}
+
 // From futures test suite
 #[cfg(not(loom))]
 #[rstest]
-fn basic<const SYNC: bool, const CACHED: bool>(
-    #[values(FALSE, TRUE)] _sync: Bool<SYNC>,
+fn basic<S: Synchronization, const RMW: bool, const CACHED: bool>(
+    #[values(SYNC, SEQ, UNSYNC, UNSYNC_RMW)] _sync: SyncMode<S, RMW>,
     #[values(FALSE, TRUE)] _cached: Bool<CACHED>,
     #[values(WakeMode::Normal, WakeMode::Cold, WakeMode::CheckBefore)] wake_mode: WakeMode,
-) {
-    let ordering = if SYNC { Relaxed } else { SeqCst };
-    let atomic_waker = Arc::new(SpmcWaker::<SYNC, CACHED>::new());
+) where
+    SyncMode<S, RMW>: WakeConditionAccess,
+{
+    let atomic_waker = Arc::new(SpmcWaker::<S, CACHED>::new());
     let atomic_waker_copy = atomic_waker.clone();
 
     let returned_pending = Arc::new(AtomicUsize::new(0));
@@ -422,7 +499,8 @@ fn basic<const SYNC: bool, const CACHED: bool>(
         let mut pending_count = 0;
 
         block_on(poll_fn(move |cx| {
-            if woken_copy.load(ordering) == 1 {
+            // the waking condition is not checked after registration so registered=true is passed
+            if SyncMode::<S, RMW>::get(&woken_copy, true) == 1 {
                 Poll::Ready(())
             } else {
                 // Assert we return pending exactly once
@@ -442,7 +520,7 @@ fn basic<const SYNC: bool, const CACHED: bool>(
     // give spawned thread some time to sleep in `block_on`
     thread::yield_now();
 
-    woken.store(1, ordering);
+    SyncMode::<S, RMW>::add(&woken, 1);
     atomic_waker.wake2(wake_mode);
 
     t.join().unwrap();
@@ -450,8 +528,8 @@ fn basic<const SYNC: bool, const CACHED: bool>(
 
 // From tokio test suite
 #[rstest]
-fn basic_notification<const SYNC: bool, const CACHED: bool>(
-    #[values(FALSE, TRUE)] _sync: Bool<SYNC>,
+fn basic_notification<S: Synchronization, const RMW: bool, const CACHED: bool>(
+    #[values(SYNC, SEQ, UNSYNC, UNSYNC_RMW)] _sync: SyncMode<S, RMW>,
     #[values(FALSE, TRUE)] _cached: Bool<CACHED>,
     #[values(
         WaitUntilMode::Normal,
@@ -460,8 +538,10 @@ fn basic_notification<const SYNC: bool, const CACHED: bool>(
     )]
     wait_until_mode: WaitUntilMode,
     #[values(WakeMode::Normal, WakeMode::Cold, WakeMode::CheckBefore)] wake_mode: WakeMode,
-) {
-    struct Chan<const S: bool, const C: bool> {
+) where
+    SyncMode<S, RMW>: WakeConditionAccess,
+{
+    struct Chan<S: Synchronization, const C: bool> {
         num: AtomicUsize,
         task: SpmcWaker<S, C>,
     }
@@ -471,17 +551,16 @@ fn basic_notification<const SYNC: bool, const CACHED: bool>(
     use loom::sync::Arc;
 
     model(move || {
-        let ordering = if SYNC { Relaxed } else { SeqCst };
-        let chan = Arc::new(Chan::<SYNC, CACHED> {
+        let chan = Arc::new(Chan::<S, CACHED> {
             num: AtomicUsize::new(0),
-            task: SpmcWaker::<SYNC, CACHED>::new(),
+            task: SpmcWaker::<S, CACHED>::new(),
         });
 
         for _ in 0..NUM_NOTIFY {
             let chan = chan.clone();
 
             thread::spawn(move || {
-                chan.num.fetch_add(1, ordering);
+                SyncMode::<S, RMW>::add(&chan.num, 1);
                 chan.task.wake2(wake_mode);
             });
         }
@@ -489,7 +568,7 @@ fn basic_notification<const SYNC: bool, const CACHED: bool>(
         block_on(poll_fn(move |cx| unsafe {
             chan.task.poll_wait_until2(
                 cx,
-                || chan.num.load(ordering) == NUM_NOTIFY,
+                |registered| SyncMode::<S, RMW>::get(&chan.num, registered) == NUM_NOTIFY,
                 wait_until_mode,
             )
         }));
@@ -524,9 +603,9 @@ fn panic_on_wake() -> Waker {
 }
 
 #[cfg(not(loom))]
-fn check_panic_recovered<const SYNC: bool, const CACHED: bool, R>(
-    spmc: SpmcWaker<SYNC, CACHED>,
-    op: impl FnOnce(&SpmcWaker<SYNC, CACHED>) -> R + std::panic::UnwindSafe,
+fn check_panic_recovered<S: Synchronization, const CACHED: bool, R>(
+    spmc: SpmcWaker<S, CACHED>,
+    op: impl FnOnce(&SpmcWaker<S, CACHED>) -> R + std::panic::UnwindSafe,
 ) {
     assert!(catch_unwind(|| op(&spmc)).is_err());
     let waker = CounterWaker::new();
@@ -540,42 +619,42 @@ fn check_panic_recovered<const SYNC: bool, const CACHED: bool, R>(
 
 #[cfg(not(loom))]
 #[rstest]
-fn clone_panic_in_register_can_be_recovered<const SYNC: bool, const CACHED: bool>(
-    #[values(FALSE, TRUE)] _sync: Bool<SYNC>,
+fn clone_panic_in_register_can_be_recovered<S: Synchronization, const CACHED: bool>(
+    #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
     #[values(FALSE, TRUE)] _cached: Bool<CACHED>,
 ) {
-    let spmc = SpmcWaker::<SYNC, CACHED>::new();
+    let spmc = SpmcWaker::<S, CACHED>::new();
     check_panic_recovered(spmc, |spmc| unsafe { spmc.register(&panic_on_clone()) });
 }
 
 #[cfg(not(loom))]
 #[rstest]
-fn clone_panic_in_register_overwrite_can_be_recovered<const SYNC: bool, const CACHED: bool>(
-    #[values(FALSE, TRUE)] _sync: Bool<SYNC>,
+fn clone_panic_in_register_overwrite_can_be_recovered<S: Synchronization, const CACHED: bool>(
+    #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
     #[values(FALSE, TRUE)] _cached: Bool<CACHED>,
 ) {
-    let spmc = SpmcWaker::<SYNC, CACHED>::new();
+    let spmc = SpmcWaker::<S, CACHED>::new();
     unsafe { spmc.register(Waker::noop()) };
     check_panic_recovered(spmc, |spmc| unsafe { spmc.register(&panic_on_clone()) });
 }
 
 #[cfg(not(loom))]
 #[rstest]
-fn drop_panic_in_unregister_can_be_recovered<const SYNC: bool>(
-    #[values(FALSE, TRUE)] _sync: Bool<SYNC>,
+fn drop_panic_in_unregister_can_be_recovered<S: Synchronization>(
+    #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
 ) {
-    let spmc = SpmcWaker::<SYNC, false>::new();
+    let spmc = SpmcWaker::<S, false>::new();
     unsafe { spmc.register(&panic_on_drop()) };
     check_panic_recovered(spmc, |spmc| unsafe { spmc.unregister() });
 }
 
 #[cfg(not(loom))]
 #[rstest]
-fn drop_panic_in_register_overwrite_can_be_recovered<const SYNC: bool, const CACHED: bool>(
-    #[values(FALSE, TRUE)] _sync: Bool<SYNC>,
+fn drop_panic_in_register_overwrite_can_be_recovered<S: Synchronization, const CACHED: bool>(
+    #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
     #[values(FALSE, TRUE)] _cached: Bool<CACHED>,
 ) {
-    let spmc = SpmcWaker::<SYNC, CACHED>::new();
+    let spmc = SpmcWaker::<S, CACHED>::new();
     unsafe { spmc.register(&panic_on_drop()) };
     let waker = CounterWaker::new();
     check_panic_recovered(spmc, |spmc| unsafe { spmc.register(&waker.waker()) });
@@ -583,10 +662,10 @@ fn drop_panic_in_register_overwrite_can_be_recovered<const SYNC: bool, const CAC
 }
 #[cfg(not(loom))]
 #[rstest]
-fn drop_panic_in_register_overwrite_cached_can_be_recovered<const SYNC: bool>(
-    #[values(FALSE, TRUE)] _sync: Bool<SYNC>,
+fn drop_panic_in_register_overwrite_cached_can_be_recovered<S: Synchronization>(
+    #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
 ) {
-    let spmc = SpmcWaker::<SYNC, true>::new();
+    let spmc = SpmcWaker::<S, true>::new();
     unsafe { spmc.register(&panic_on_drop()) };
     spmc.wake();
     let waker = CounterWaker::new();
@@ -596,11 +675,11 @@ fn drop_panic_in_register_overwrite_cached_can_be_recovered<const SYNC: bool>(
 
 #[cfg(not(loom))]
 #[rstest]
-fn wake_panic_can_be_recovered<const SYNC: bool, const CACHED: bool>(
-    #[values(FALSE, TRUE)] _sync: Bool<SYNC>,
+fn wake_panic_can_be_recovered<S: Synchronization, const CACHED: bool>(
+    #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
     #[values(FALSE, TRUE)] _cached: Bool<CACHED>,
 ) {
-    let spmc = SpmcWaker::<SYNC, CACHED>::new();
+    let spmc = SpmcWaker::<S, CACHED>::new();
     unsafe { spmc.register(&panic_on_wake()) };
     check_panic_recovered(spmc, |spmc| spmc.wake());
 }
@@ -651,10 +730,10 @@ impl Wake for LeakWaker {
 
 #[cfg(not(loom))]
 #[rstest]
-fn fallback_waker_leaked_when_main_wake_panics<const SYNC: bool>(
-    #[values(FALSE, TRUE)] _sync: Bool<SYNC>,
+fn fallback_waker_leaked_when_main_wake_panics<S: Synchronization>(
+    #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
 ) {
-    let spmc = SpmcWaker::<SYNC, true>::new();
+    let spmc = SpmcWaker::<S, true>::new();
 
     let main = LeakWaker::new(true);
     unsafe { spmc.register(&main.waker()) };
@@ -679,10 +758,10 @@ fn fallback_waker_leaked_when_main_wake_panics<const SYNC: bool>(
 
 #[cfg(not(loom))]
 #[rstest]
-fn fallback_waker_leaked_when_fallback_wake_panics<const SYNC: bool>(
-    #[values(FALSE, TRUE)] _sync: Bool<SYNC>,
+fn fallback_waker_leaked_when_fallback_wake_panics<S: Synchronization>(
+    #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
 ) {
-    let spmc = SpmcWaker::<SYNC, true>::new();
+    let spmc = SpmcWaker::<S, true>::new();
 
     let main = LeakWaker::new(false);
     unsafe { spmc.register(&main.waker()) };

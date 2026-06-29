@@ -30,7 +30,7 @@ struct Waiter(Arc<Inner>);
 
 impl Waiter {
     async fn wait(&mut self) {
-        let is_notified = || self.0.notified.swap(false, Relaxed);
+        let is_notified = |_| self.0.notified.swap(false, Relaxed);
         unsafe { self.0.waker.wait_until(is_notified).await };
     }
 

@@ -1,14 +1,19 @@
+#![allow(unexpected_cfgs)]
 use core::task::Waker;
 use std::{
     sync::atomic::{AtomicBool, Ordering::Relaxed},
     task::{Context, Poll},
 };
 
-#[allow(unexpected_cfgs)]
-const SYNC: bool = cfg!(sync);
-#[allow(unexpected_cfgs)]
+#[cfg(synchronized)]
+type Mode = spmc_waker::Synchronized;
+#[cfg(sequential)]
+type Mode = spmc_waker::Sequential;
+#[cfg(unsynchronized)]
+type Mode = spmc_waker::Unsynchronized;
+
 const CACHED: bool = cfg!(cached);
-type SpmcWaker = spmc_waker::SpmcWaker<SYNC, CACHED>;
+type SpmcWaker = spmc_waker::SpmcWaker<Mode, CACHED>;
 
 #[unsafe(no_mangle)]
 fn asm_wake_asm(spmc: &SpmcWaker) {

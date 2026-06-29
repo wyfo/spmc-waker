@@ -16,12 +16,14 @@ ARCHES=(
     "aarch64:aarch64-unknown-linux-gnu:-C target-feature=+lse"
 )
 
-# cfg prefix : directory label : cold wake helper
+# cfg prefix : directory label
 VARIANTS=(
-    "--cfg=sync --cfg=cached:SYNC=true,CACHED=true"
-    "--cfg=sync:SYNC=true,CACHED=false"
-    "--cfg=cached:SYNC=false,CACHED=true"
-    ":SYNC=false,CACHED=false"
+    "--cfg=synchronized --cfg=cached:SYNC=Synchronized,CACHED=true"
+    "--cfg=synchronized:SYNC=Synchronized,CACHED=false"
+    "--cfg=sequential --cfg=cached:SYNC=Sequential,CACHED=true"
+    "--cfg=sequential:SYNC=Sequential,CACHED=false"
+    "--cfg=unsynchronized --cfg=cached:SYNC=Unsynchronized,CACHED=true"
+    "--cfg=unsynchronized:SYNC=Unsynchronized,CACHED=false"
 )
 
 # check_unit <arch> <target> <extra_flags> <dir> <cfg> <fn> <name>
