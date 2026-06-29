@@ -1,5 +1,10 @@
 # spmc-waker
 
+[![Crates.io](https://img.shields.io/crates/v/spmc-waker.svg)](https://crates.io/crates/spmc-waker)
+[![Documentation](https://docs.rs/spmc-waker/badge.svg)](https://docs.rs/spmc-waker)
+[![CI](https://github.com/wyfo/spmc-waker/actions/workflows/ci.yml/badge.svg)](https://github.com/wyfo/spmc-waker/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT_OR_Apache--2.0-blue.svg)](https://github.com/wyfo/spmc-waker#license)
+
 A lock-free synchronization primitive for task wakeup.
 
 ## Features
@@ -177,3 +182,12 @@ While discovered after starting the project, it was a great inspiration, not for
 However, `SpmcWaker`'s algorithm was mainly focused on making `wake_cold` as light as possible; that's why the initial algorithm used `SeqCst` (`S=Sequential` version). The default synchronized algorithm was added later for compatibility — and for its own benefits.
 
 Still, `SpmcWaker` pushes algorithm and code optimizations further than `DiatomicWaker`, as shown in [benchmarks](benches/README.md).
+
+## License
+
+Licensed under either of
+
+- [Apache License, Version 2.0](LICENSE-APACHE)
+- [MIT license](LICENSE-MIT)
+
+at your option.
