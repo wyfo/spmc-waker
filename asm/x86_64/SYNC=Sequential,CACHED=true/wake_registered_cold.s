@@ -32,6 +32,7 @@ spmc_waker::SpmcWaker<S,_>::wake_registered_cold:
 	lock cmpxchg	qword ptr [r12], rbx
 	jne .LBB4_10
 .LBB4_8:
+	xor eax, eax
 	add rsp, 8
 	pop rbx
 	pop r12

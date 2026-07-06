@@ -3,6 +3,7 @@ spmc_waker::SpmcWaker<S,_>::wake_registered_cold:
 	stp x22, x21, [sp, #16]
 	stp x20, x19, [sp, #32]
 	mov x29, sp
+.LBB4_1:
 	tbnz w1, #1, .LBB4_8
 	add x21, x1, #2
 	mov x8, x1
@@ -30,6 +31,7 @@ spmc_waker::SpmcWaker<S,_>::wake_registered_cold:
 	cmp x1, x21
 	b.ne .LBB4_9
 .LBB4_8:
+	mov w0, wzr
 	ldp x20, x19, [sp, #32]
 	ldp x22, x21, [sp, #16]
 	ldp x29, x30, [sp], #48

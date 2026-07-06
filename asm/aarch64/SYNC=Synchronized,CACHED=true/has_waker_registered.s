@@ -4,5 +4,6 @@ asm_has_waker_registered_asm:
 	ldsetl xzr, x8, [x0]
 	and w0, w8, #0x1
 	ret
+.LBB9_2:
 	mov w0, #1
 	ret

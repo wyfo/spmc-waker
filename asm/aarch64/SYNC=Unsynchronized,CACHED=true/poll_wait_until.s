@@ -3,6 +3,7 @@ asm_poll_wait_until_asm:
 	cbz w8, .LBB10_2
 	mov w0, wzr
 	ret
+.LBB10_2:
 	ldr x1, [x1]
 	mov x3, x2
 	ldar x2, [x0]
@@ -20,6 +21,7 @@ asm_poll_wait_until_asm:
 	cas x9, x8, [x0]
 	mov w0, wzr
 	ret
+.LBB10_6:
 	mov w0, #1
 	ret
 .LBB10_7:

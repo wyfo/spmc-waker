@@ -53,3 +53,15 @@ unsafe fn asm_unregister_asm(spmc: &SpmcWaker) -> bool {
 fn asm_has_waker_registered_asm(spmc: &SpmcWaker) -> bool {
     spmc.has_waker_registered()
 }
+
+#[cfg(not(cached))]
+#[unsafe(no_mangle)]
+fn asm_take_asm(spmc: &SpmcWaker) -> Option<Waker> {
+    spmc.take()
+}
+
+#[cfg(not(cached))]
+#[unsafe(no_mangle)]
+fn asm_take_cold_asm(spmc: &SpmcWaker) -> Option<Waker> {
+    spmc.take_cold()
+}

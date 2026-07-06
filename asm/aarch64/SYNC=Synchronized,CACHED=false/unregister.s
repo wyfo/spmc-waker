@@ -4,12 +4,12 @@ asm_unregister_asm:
 	sub x10, x8, #4
 	cmp x9, #1
 	ccmn x10, #9, #2, eq
-	b.hi .LBB13_3
+	b.hi .LBB17_3
 	sub x9, x8, #1
 	mov x10, x8
 	casa x10, x9, [x0]
 	cmp x10, x8
-	b.ne .LBB13_3
+	b.ne .LBB17_3
 	stp x29, x30, [sp, #-16]!
 	mov x29, sp
 	ldr x0, [x0, #8]
@@ -18,6 +18,6 @@ asm_unregister_asm:
 	mov w0, #1
 	ldp x29, x30, [sp], #16
 	ret
-.LBB13_3:
+.LBB17_3:
 	mov w0, wzr
 	ret

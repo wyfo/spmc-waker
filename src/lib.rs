@@ -14,6 +14,7 @@
 extern crate std;
 
 use core::{
+    convert::identity,
     hint::assert_unchecked,
     marker::PhantomData,
     mem::ManuallyDrop,
@@ -482,7 +483,7 @@ impl<S: Synchronization, const CACHED: bool> SpmcWaker<S, CACHED> {
     fn register_cold(
         &self,
         waker: &Waker,
-        vtable: *mut RawWakerVTable,
+        mut vtable: *mut RawWakerVTable,
         force: bool,
         clone: bool,
     ) -> bool {
@@ -505,7 +506,6 @@ impl<S: Synchronization, const CACHED: bool> SpmcWaker<S, CACHED> {
         if vtable.has(WAKING) {
             return force && self.register_fallback(vtable, waker, clone);
         }
-        let mut _waker_to_drop = None;
         // Unregister the registered waker if there is one.
         if vtable.has(REGISTERED) {
             if is_fallback(vtable) {
@@ -516,9 +516,7 @@ impl<S: Synchronization, const CACHED: bool> SpmcWaker<S, CACHED> {
             // in between and requires Acquire ordering to synchronize data access.
             // TRANSITION: V|R -> V
             match (self.vtable).compare_exchange(vtable, NOOP_PTR, Relaxed, Acquire) {
-                // Unregistered waker must be dropped.
-                // SAFETY: waker data access was already synchronized
-                Ok(_) => _waker_to_drop = Some(unsafe { self.waker(vtable.unset(REGISTERED)) }),
+                Ok(_) => {}
                 // A concurrent `wake` happened, return if registration is not forced,
                 // as wake condition is surely met.
                 Err(_) if !force => return false,
@@ -526,30 +524,32 @@ impl<S: Synchronization, const CACHED: bool> SpmcWaker<S, CACHED> {
                 Err(vtable) if vtable.has(WAKING) => {
                     return self.register_fallback(vtable, waker, clone);
                 }
-                // `wake` is done, but the waker must still be overwritten, so the cached waker
-                // must be dropped. It's not possible to reuse it as the first check of the
-                // function would have returned true in that case.
-                // SAFETY: No concurrent `register` can happen, and there is no fallback waker
-                // registered, so `wake` can't modify data
-                Err(vtable) if CACHED => _waker_to_drop = Some(unsafe { self.waker(vtable) }),
-                Err(vtable) => {
-                    debug_assert!(!is_fallback(vtable) && !vtable.has(REGISTERED | WAKING));
+                // `wake` has completed and the waker has been unregistered.
+                Err(v) => {
+                    debug_assert_eq!(v, vtable.unset(REGISTERED));
+                    vtable = v;
                 }
             }
-        // Cached waker will be overwritten and must be dropped
-        } else if CACHED {
-            // SAFETY: No concurrent `register` can happen, and there is no fallback waker
-            // registered, so `wake` can't modify data
-            _waker_to_drop = Some(unsafe { self.waker(vtable) });
-        };
+        }
         let waker_clone;
         let waker = if clone {
-            waker_clone = ManuallyDrop::new(waker.clone());
+            // If clone panics and there was a registered waker, it is restored.
+            let restore_waker = || {
+                if vtable.has(REGISTERED) {
+                    self.vtable.swap(vtable, SeqCst); // !ORDERING
+                }
+            };
+            waker_clone = ManuallyDrop::new(guard(|| waker.clone(), restore_waker));
             &waker_clone
         } else {
             waker
         };
-        // Register the waker clone.
+        // The waker will be overwritten. If there was a waker cached or registered,
+        // it has to be dropped.
+        // SAFETY: No concurrent `register` can happen, and there is no fallback waker
+        // registered, so `wake` can't modify data
+        let _prev_waker = (CACHED || vtable.has(REGISTERED))
+            .then(|| unsafe { self.waker(vtable.unset(REGISTERED)) });
         self.register_vtable(waker, true);
         true
     }
@@ -706,11 +706,9 @@ impl<S: Synchronization, const CACHED: bool> SpmcWaker<S, CACHED> {
     }
 
     /// Consumes the last `Waker` registered and wakes its task.
-    ///
-    /// If `register` has not been called yet, then this does nothing.
     #[inline]
     pub fn wake(&self) {
-        self.check_registered_and_wake(false, Self::wake_waker);
+        self.check_registered_and_wake(false, Waker::wake);
     }
 
     /// Same as [`wake`](Self::wake), but with the waking path marked `#[cold]`.
@@ -719,26 +717,16 @@ impl<S: Synchronization, const CACHED: bool> SpmcWaker<S, CACHED> {
     /// `wake` when waking is the uncommon case.
     #[inline]
     pub fn wake_cold(&self) {
-        self.check_registered_and_wake(true, Self::wake_waker);
+        self.check_registered_and_wake(true, Waker::wake);
     }
 
     #[inline(always)]
-    fn wake_waker(waker: Waker) {
-        if CACHED {
-            ManuallyDrop::new(waker).wake_by_ref();
+    fn check_registered_and_wake<R>(&self, cold: bool, wake: impl FnOnce(Waker) -> R) -> Option<R> {
+        let (vtable, released) = self.has_waker_registered_impl()?;
+        if cold {
+            self.wake_registered_cold(vtable, released, wake)
         } else {
-            waker.wake();
-        }
-    }
-
-    #[inline(always)]
-    fn check_registered_and_wake(&self, cold: bool, wake: impl FnMut(Waker)) {
-        if let Some((vtable, released)) = self.has_waker_registered_impl() {
-            if cold {
-                self.wake_registered_cold(vtable, released, wake);
-            } else {
-                self.wake_registered(vtable, released, wake);
-            }
+            self.wake_registered(vtable, released, wake)
         }
     }
 
@@ -748,12 +736,12 @@ impl<S: Synchronization, const CACHED: bool> SpmcWaker<S, CACHED> {
     const RELEASE: Ordering = if S::SYNC { Release } else { SeqCst }; // !ORDERING
 
     #[inline(always)]
-    fn wake_registered(
+    fn wake_registered<R>(
         &self,
         mut vtable: *mut RawWakerVTable,
         mut released: bool,
-        mut wake: impl FnMut(Waker),
-    ) {
+        wake: impl FnOnce(Waker) -> R,
+    ) -> Option<R> {
         // A waker is registered, try setting the WAKING flag.
         loop {
             if !vtable.has(WAKING) {
@@ -789,11 +777,11 @@ impl<S: Synchronization, const CACHED: bool> SpmcWaker<S, CACHED> {
             // There is no interest in retrying, as the wake condition should already
             // have been met, so it will be checked successfully after registering the
             // next waker.
-            return;
+            return None;
         }
         // The fallback waker has been notified for the waking thread to call it, return.
         if is_fallback(vtable) {
-            return;
+            return None;
         }
         // SAFETY: it has been tested before, but this assert helps compiler
         unsafe { assert_unchecked(vtable.has(REGISTERED)) };
@@ -802,12 +790,10 @@ impl<S: Synchronization, const CACHED: bool> SpmcWaker<S, CACHED> {
         let waker = unsafe { self.waker(unregistered) };
         // With CACHED=true, as `wake_by_ref` uses a reference, the waker must remain
         // valid so it must be executed before resetting the state.
-        let mut waker = ManuallyDrop::new(waker);
+        let waker = ManuallyDrop::new(waker);
         if CACHED {
             guard(
-                // SAFETY: with CACHED=true, wake function wraps the waker into
-                // a ManuallyDrop, so it will not be duplicated.
-                || wake(unsafe { ManuallyDrop::take(&mut waker) }),
+                || waker.wake_by_ref(),
                 // If a new waker is registered in fallback, it will be leaked.
                 // Leaking is better than risking an abort because of double panic.
                 || self.vtable.swap(unregistered, SeqCst), // !ORDERING
@@ -825,25 +811,28 @@ impl<S: Synchronization, const CACHED: bool> SpmcWaker<S, CACHED> {
         // older in modification order than the registration would coherence-order
         // the load *before* the registration — contradiction
         // TRANSITION: V|R|W -> V
-        if let Err(vtable) =
-            (self.vtable).compare_exchange(vtable.set(WAKING), unregistered, Self::RELEASE, Relaxed)
-        {
+        match (self.vtable).compare_exchange(
+            vtable.set(WAKING),
+            unregistered,
+            Self::RELEASE,
+            Relaxed,
+        ) {
+            Ok(_) if CACHED => None,
+            Ok(_) => Some(wake(ManuallyDrop::into_inner(waker))),
             // Failing to reset the state means a concurrent `register` forced
             // a fallback waker registration.
-            self.wake_fallback(vtable, unregistered, waker, wake);
-        } else if !CACHED {
-            wake(ManuallyDrop::into_inner(waker));
+            Err(vtable) => self.wake_fallback(vtable, unregistered, waker, wake),
         }
     }
 
     #[cold]
-    fn wake_fallback(
+    fn wake_fallback<R>(
         &self,
         mut vtable: *mut RawWakerVTable,
         unregistered: *mut RawWakerVTable,
         waker: ManuallyDrop<Waker>,
-        mut wake: impl FnMut(Waker),
-    ) {
+        wake: impl FnOnce(Waker) -> R,
+    ) -> Option<R> {
         // A fallback waker has been registered, and may be registered again or woken concurrently.
         loop {
             // `register` tries acquiring the fallback waker to overwrite it.
@@ -862,7 +851,7 @@ impl<S: Synchronization, const CACHED: bool> SpmcWaker<S, CACHED> {
                 if !CACHED {
                     drop(ManuallyDrop::into_inner(waker));
                 }
-
+                return None;
             // A fallback waker has been registered, it should replace the main waker.
             } else if vtable == NULL.set(REGISTERED) {
                 let read_fallback = READ_FALLBACK.set(REGISTERED);
@@ -892,6 +881,7 @@ impl<S: Synchronization, const CACHED: bool> SpmcWaker<S, CACHED> {
                     continue;
                 }
                 drop(ManuallyDrop::into_inner(waker));
+                return None;
             // A registered fallback waker has been notified by another thread.
             } else {
                 debug_assert!(vtable.has(REGISTERED) && vtable.has(WAKING));
@@ -900,7 +890,7 @@ impl<S: Synchronization, const CACHED: bool> SpmcWaker<S, CACHED> {
                 if vtable != read_fallback
                     // TRANSITION: N|R|W -> RF|R|W
                     && let Err(v) =
-                        (self.vtable).compare_exchange(vtable, read_fallback, Acquire, Relaxed)
+                    (self.vtable).compare_exchange(vtable, read_fallback, Acquire, Relaxed)
                 {
                     vtable = v;
                     continue;
@@ -908,7 +898,7 @@ impl<S: Synchronization, const CACHED: bool> SpmcWaker<S, CACHED> {
                 // SAFETY: fallback waker is used after resetting the vtable to unregistered
                 // so they can't have been concurrent modification of fallback waker as
                 // register would first try to reset the vtable to NULL.
-                let mut fallback_waker = ManuallyDrop::new(unsafe { self.fallback_waker() });
+                let fallback_waker = ManuallyDrop::new(unsafe { self.fallback_waker() });
                 // Now reset the vtable to unregistered to wake the fallback waker.
                 // TRANSITION: RF|R|W -> V
                 if let Err(v) = (self.vtable).compare_exchange(
@@ -920,62 +910,40 @@ impl<S: Synchronization, const CACHED: bool> SpmcWaker<S, CACHED> {
                     vtable = v;
                     continue;
                 }
-                // SAFETY: with CACHED=true, wake function wraps the waker into
-                // a ManuallyDrop, so it will not be duplicated.
-                wake(unsafe { ManuallyDrop::take(&mut fallback_waker) });
-                if CACHED {
-                    drop(ManuallyDrop::into_inner(fallback_waker));
-                } else {
+                let res = Some(wake(ManuallyDrop::into_inner(fallback_waker)));
+                if !CACHED {
                     drop(ManuallyDrop::into_inner(waker));
                 }
+                return res;
             }
-            return;
         }
     }
 
     #[cold]
     #[inline(never)]
-    fn wake_registered_cold(
+    fn wake_registered_cold<R>(
         &self,
         vtable: *mut RawWakerVTable,
         released: bool,
-        wake: impl FnMut(Waker),
-    ) {
-        self.wake_registered(vtable, released, wake);
+        wake: impl FnOnce(Waker) -> R,
+    ) -> Option<R> {
+        self.wake_registered(vtable, released, wake)
     }
 }
-
-impl<S: Synchronization> SpmcWaker<S, true> {
-    /// Applies the given function to the last `Waker` passed to `register`.
-    #[inline]
-    pub fn wake_with<W: FnMut(&Waker)>(&self, mut wake: W) {
-        self.check_registered_and_wake(false, move |w| wake(&ManuallyDrop::new(w)));
-    }
-
-    /// Same as [`wake_with`](Self::wake_with), but with the waking path marked `#[cold]`.
-    ///
-    /// This allows the method to inline more effectively. Prefer this over
-    /// `wake_with` when taking is the uncommon case.
-    #[inline]
-    pub fn wake_with_cold<W: FnMut(&Waker)>(&self, mut wake: W) {
-        self.check_registered_and_wake(true, move |w| wake(&ManuallyDrop::new(w)));
-    }
-}
-
 impl<S: Synchronization> SpmcWaker<S, false> {
-    /// Applies the given function to the last `Waker` passed to `register`.
+    /// Consumes the last `Waker` registered and returns it.
     #[inline]
-    pub fn wake_with<W: FnMut(Waker)>(&self, wake: W) {
-        self.check_registered_and_wake(false, wake);
+    pub fn take(&self) -> Option<Waker> {
+        self.check_registered_and_wake(false, identity)
     }
 
-    /// Same as [`wake_with`](Self::wake_with), but with the waking path marked `#[cold]`.
+    /// Same as [`take`](Self::take), but with the taking path marked `#[cold]`.
     ///
     /// This allows the method to inline more effectively. Prefer this over
-    /// `wake_with` when taking is the uncommon case.
+    /// `take` when taking is the uncommon case.
     #[inline]
-    pub fn wake_with_cold<W: FnMut(Waker)>(&self, wake: W) {
-        self.check_registered_and_wake(true, wake);
+    pub fn take_cold(&self) -> Option<Waker> {
+        self.check_registered_and_wake(true, identity)
     }
 }
 

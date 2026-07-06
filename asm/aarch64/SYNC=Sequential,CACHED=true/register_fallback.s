@@ -12,6 +12,7 @@ spmc_waker::SpmcWaker<S,_>::register_fallback:
 	blr x8
 	mov x2, sp
 	stp x0, x1, [sp]
+.LBB2_2:
 	add x8, x20, #4
 	cmp x8, #7
 	b.hi .LBB2_6
@@ -43,6 +44,7 @@ spmc_waker::SpmcWaker<S,_>::register_fallback:
 	casal x8, x0, [x19]
 	cmp x8, x20
 	b.ne .LBB2_12
+.LBB2_7:
 	ldp x20, x19, [sp, #48]
 	ldr x21, [sp, #32]
 	ldp x29, x30, [sp, #16]
@@ -63,6 +65,7 @@ spmc_waker::SpmcWaker<S,_>::register_fallback:
 	ldr x8, [x21, #24]
 	mov x0, x20
 	blr x8
+.LBB2_11:
 	mov w0, #1
 	ldp x20, x19, [sp, #48]
 	ldr x21, [sp, #32]
@@ -94,6 +97,7 @@ spmc_waker::SpmcWaker<S,_>::register_fallback:
 	ldr x8, [x21, #24]
 	mov x0, x20
 	blr x8
+.LBB2_18:
 	mov x0, x19
 	bl _Unwind_Resume
 	bl core::panicking::panic_in_cleanup

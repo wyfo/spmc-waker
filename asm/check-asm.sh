@@ -49,6 +49,9 @@ check_unit() {
         actual=$(CARGO_TARGET_DIR=$tdir RUSTFLAGS="$cfg $extra" cargo asm --lib --target "$target" --simplify "$fn" 2>/dev/null) || true
         [[ -n "$actual" ]] && break
     done
+    # cargo/the pipe may emit CRLF on Windows; normalize to LF so generated
+    # references are platform-independent.
+    actual="${actual//$'\r'/}"
 
     local asm_file="$arch/$dir/$name.s"
 
@@ -85,6 +88,14 @@ for arch_entry in "${ARCHES[@]}"; do
             check_unit "$arch" "$target" "$extra" "$dir" "$cfg" "asm_${op}_asm" "$op" &
             pids+=("$!")
         done
+
+        # take/take_cold only exist on SpmcWaker<S, false>
+        if [[ "$dir" == *"CACHED=false"* ]]; then
+            for op in take take_cold; do
+                check_unit "$arch" "$target" "$extra" "$dir" "$cfg" "asm_${op}_asm" "$op" &
+                pids+=("$!")
+            done
+        fi
 
         # ── cold helpers outlined from hot paths ─────────────────────────
 
