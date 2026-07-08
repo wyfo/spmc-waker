@@ -34,7 +34,7 @@ use crate::{
     },
     state_machine::{NULL, READ_FALLBACK, REGISTERED, WAKING, is_fallback},
     sync::SyncMode,
-    utils::{NOOP_PTR, TaggedPointerExt, UnsafeCellExt, WakerExt, guard},
+    utils::{NOOP_PTR, TaggedPointerExt, UnsafeCellExt, WakerExt, handle_panic},
 };
 
 #[cfg(all(debug_assertions, not(loom)))]
@@ -539,7 +539,7 @@ impl<S: Synchronization, const CACHED: bool> SpmcWaker<S, CACHED> {
                     self.vtable.swap(vtable, SeqCst); // !ORDERING
                 }
             };
-            waker_clone = ManuallyDrop::new(guard(|| waker.clone(), restore_waker));
+            waker_clone = ManuallyDrop::new(handle_panic(|| waker.clone(), restore_waker));
             &waker_clone
         } else {
             waker
@@ -792,7 +792,7 @@ impl<S: Synchronization, const CACHED: bool> SpmcWaker<S, CACHED> {
         // valid so it must be executed before resetting the state.
         let waker = ManuallyDrop::new(waker);
         if CACHED {
-            guard(
+            handle_panic(
                 || waker.wake_by_ref(),
                 // If a new waker is registered in fallback, it will be leaked.
                 // Leaking is better than risking an abort because of double panic.

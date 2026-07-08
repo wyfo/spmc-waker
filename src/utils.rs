@@ -116,9 +116,9 @@ pub(crate) fn defer<F: FnOnce() -> T, T>(f: F) -> Defer<F, T> {
 }
 
 #[inline(always)]
-pub(crate) fn guard<R, T>(f: impl FnOnce() -> R, reset: impl FnOnce() -> T) -> R {
+pub(crate) fn handle_panic<R, T>(f: impl FnOnce() -> R, on_panic: impl FnOnce() -> T) -> R {
     let guard = defer(move || {
-        reset();
+        on_panic();
     });
     let res = f();
     guard.cancel();
