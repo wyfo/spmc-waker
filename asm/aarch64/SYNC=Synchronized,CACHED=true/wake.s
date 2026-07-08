@@ -9,6 +9,7 @@ asm_wake_asm:
 	tbnz w8, #0, .LBB14_2
 	ldsetl xzr, x8, [x0]
 	tbz w8, #0, .LBB14_11
+.LBB14_2:
 	tbnz w8, #1, .LBB14_6
 	add x21, x8, #2
 	mov x10, x8

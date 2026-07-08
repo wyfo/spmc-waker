@@ -3,7 +3,7 @@ asm_try_register_asm:
 	mov rbx, rdi
 	mov rdx, qword ptr [rdi]
 	test dl, 3
-	jne .LBB12_2
+	jne .LBB16_2
 	mov rax, qword ptr [rsi]
 	mov rdi, qword ptr [rsi + 8]
 	call qword ptr [rax]
@@ -13,7 +13,7 @@ asm_try_register_asm:
 	mov al, 1
 	pop rbx
 	ret
-.LBB12_2:
+.LBB16_2:
 	mov rdi, rbx
 	xor ecx, ecx
 	mov r8d, 1

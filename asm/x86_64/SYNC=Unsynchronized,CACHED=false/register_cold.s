@@ -1,102 +1,102 @@
 spmc_waker::SpmcWaker<S,_>::register_cold:
-	push r15
 	push r14
 	push rbx
+	push rax
 	mov r9, qword ptr [rsi]
 	lea rax, [r9 + 1]
 	cmp rax, rdx
 	sete al
+	lea r10, [rsi + 8]
 	test r8b, al
 	je .LBB0_2
-	mov rax, qword ptr [rsi + 8]
+	mov rax, qword ptr [r10]
 	cmp rax, qword ptr [rdi + 8]
-	je .LBB0_17
+	je .LBB0_15
 .LBB0_2:
 	test dl, 2
-	jne .LBB0_7
+	jne .LBB0_9
 	test dl, 1
-	jne .LBB0_10
+	jne .LBB0_11
 .LBB0_4:
-	xor edx, edx
 	test r8b, r8b
-	je .LBB0_14
-.LBB0_5:
+	je .LBB0_7
+	mov rbx, rdx
 	mov r14, rdi
-	mov r15, rdx
-	mov rdi, qword ptr [rsi + 8]
+	mov rdi, qword ptr [r10]
 	call qword ptr [r9]
 	mov r9, rax
-	mov rax, rdx
-	mov rdx, r15
+	mov qword ptr [rsp], rdx
+	mov r10, rsp
 	mov rdi, r14
-	jmp .LBB0_15
+	mov rdx, rbx
 .LBB0_7:
-	test cl, cl
-	jne .LBB0_11
-.LBB0_8:
-	xor eax, eax
+	test dl, 1
+	jne .LBB0_13
+	mov rax, qword ptr [r10]
+	mov qword ptr [rdi + 8], rax
+	inc r9
+	mov qword ptr [rdi], r9
+	jmp .LBB0_15
 .LBB0_9:
+	test cl, cl
+	jne .LBB0_12
+.LBB0_20:
+	xor eax, eax
+	add rsp, 8
 	pop rbx
 	pop r14
-	pop r15
 	ret
-.LBB0_10:
+.LBB0_11:
 	lea rax, [rdx + 4]
 	cmp rax, 8
-	jae .LBB0_12
-.LBB0_11:
+	jae .LBB0_16
+.LBB0_12:
 	movzx ecx, r8b
 	mov rax, rsi
 	mov rsi, rdx
 	mov rdx, rax
+	add rsp, 8
 	pop rbx
 	pop r14
-	pop r15
 	jmp spmc_waker::SpmcWaker<S,_>::register_fallback
-.LBB0_12:
-	lea r10, [rip + .Lanon.7eba71367c8ad9c0d026fdd93409e67e.0]
-	mov rax, rdx
-	lock cmpxchg	qword ptr [rdi], r10
-	jne .LBB0_18
-	dec rdx
-	mov rbx, qword ptr [rdi + 8]
-	test r8b, r8b
-	jne .LBB0_5
-.LBB0_14:
-	mov rax, qword ptr [rsi + 8]
-.LBB0_15:
-	mov qword ptr [rdi + 8], rax
+.LBB0_13:
+	mov rax, qword ptr [rdi + 8]
+	mov rcx, qword ptr [r10]
+	mov qword ptr [rdi + 8], rcx
 	inc r9
 	mov qword ptr [rdi], r9
+	cmp rdx, 1
+	je .LBB0_15
+	mov rdi, rax
+	call qword ptr [rdx + 23]
+.LBB0_15:
 	mov al, 1
-	test rdx, rdx
-	je .LBB0_9
-	mov rdi, rbx
-	call qword ptr [rdx + 24]
-.LBB0_17:
-	mov al, 1
+	add rsp, 8
 	pop rbx
 	pop r14
-	pop r15
 	ret
-.LBB0_18:
-	test cl, cl
-	je .LBB0_8
-	test al, 2
+.LBB0_16:
+	lea r11, [rip + .Lanon.e6e001160a19f58682a385f8f5653c86.0]
+	mov rax, rdx
+	lock cmpxchg	qword ptr [rdi], r11
 	je .LBB0_4
+	test cl, cl
+	je .LBB0_20
+	test al, 2
+	jne .LBB0_22
+	mov rdx, rax
+	jmp .LBB0_4
+.LBB0_22:
 	movzx ecx, r8b
 	mov rdx, rsi
 	mov rsi, rax
+	add rsp, 8
 	pop rbx
 	pop r14
-	pop r15
 	jmp spmc_waker::SpmcWaker<S,_>::register_fallback
-	mov r14, rax
-	test r15, r15
-	je .LBB0_24
-	mov rdi, rbx
-	call qword ptr [r15 + 24]
-.LBB0_24:
-	mov rdi, r14
+	test bl, 1
+	je .LBB0_25
+	xchg qword ptr [r14], rbx
+.LBB0_25:
+	mov rdi, rax
 	call _Unwind_Resume@PLT
-	call qword ptr [rip + core::panicking::panic_in_cleanup@GOTPCREL]

@@ -10,6 +10,7 @@ asm_wake_asm:
 	ldp x22, x21, [sp, #16]
 	ldp x29, x30, [sp], #48
 	ret
+.LBB14_2:
 	tbnz w8, #1, .LBB14_1
 	add x21, x8, #2
 	mov x9, x8

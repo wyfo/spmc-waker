@@ -5,7 +5,7 @@ asm_try_register_asm:
 	ldar x2, [x0]
 	mov x19, x0
 	tst x2, #0x3
-	b.ne .LBB12_2
+	b.ne .LBB16_2
 	ldp x8, x0, [x1]
 	ldr x8, [x8]
 	blr x8
@@ -16,7 +16,7 @@ asm_try_register_asm:
 	ldr x19, [sp, #16]
 	ldp x29, x30, [sp], #32
 	ret
-.LBB12_2:
+.LBB16_2:
 	mov x0, x19
 	mov w3, wzr
 	mov w4, #1
