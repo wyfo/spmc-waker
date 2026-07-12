@@ -18,12 +18,18 @@ ARCHES=(
 
 # cfg prefix : directory label
 VARIANTS=(
-    "--cfg=synchronized --cfg=cached:SYNC=Synchronized,CACHED=true"
-    "--cfg=synchronized:SYNC=Synchronized,CACHED=false"
-    "--cfg=sequential --cfg=cached:SYNC=Sequential,CACHED=true"
-    "--cfg=sequential:SYNC=Sequential,CACHED=false"
-    "--cfg=unsynchronized --cfg=cached:SYNC=Unsynchronized,CACHED=true"
-    "--cfg=unsynchronized:SYNC=Unsynchronized,CACHED=false"
+    "--cfg=synchronized --cfg=cached --cfg=strict:S=Synchronized,CACHED=true,R=Strict"
+    "--cfg=synchronized --cfg=strict:S=Synchronized,CACHED=false,R=Strict"
+    "--cfg=sequential --cfg=cached --cfg=strict:S=Sequential,CACHED=true,R=Strict"
+    "--cfg=sequential --cfg=strict:S=Sequential,CACHED=false,R=Strict"
+    "--cfg=unsynchronized --cfg=c --cfg=strictached:S=Unsynchronized,CACHED=true,R=Strict"
+    "--cfg=unsynchronized --cfg=strict:S=Unsynchronized,CACHED=false,R=Strict"
+    "--cfg=synchronized --cfg=cached --cfg=unchecked:S=Synchronized,CACHED=true,R=Unchecked"
+    "--cfg=synchronized --cfg=unchecked:S=Synchronized,CACHED=false,R=Unchecked"
+    "--cfg=sequential --cfg=cached --cfg=unchecked:S=Sequential,CACHED=true,R=Unchecked"
+    "--cfg=sequential --cfg=unchecked:S=Sequential,CACHED=false,R=Unchecked"
+    "--cfg=unsynchronized --cfg=cached --cfg=unchecked:S=Unsynchronized,CACHED=true,R=Unchecked"
+    "--cfg=unsynchronized --cfg=unchecked:S=Unsynchronized,CACHED=false,R=Unchecked"
 )
 
 # check_unit <arch> <target> <extra_flags> <dir> <cfg> <fn> <name>
@@ -84,31 +90,17 @@ for arch_entry in "${ARCHES[@]}"; do
 
         # ── hot-path functions ────────────────────────────────────────────
 
-        for op in wake wake_cold try_register register unregister poll_wait_until has_waker_registered; do
+        for op in take wake wake_cold register unregister poll_wait_until registered; do
             check_unit "$arch" "$target" "$extra" "$dir" "$cfg" "asm_${op}_asm" "$op" &
             pids+=("$!")
         done
 
-        # take/take_cold only exist on SpmcWaker<S, false>
-        if [[ "$dir" == *"CACHED=false"* ]]; then
-            for op in take take_cold; do
-                check_unit "$arch" "$target" "$extra" "$dir" "$cfg" "asm_${op}_asm" "$op" &
-                pids+=("$!")
-            done
-        fi
-
         # ── cold helpers outlined from hot paths ─────────────────────────
 
-        # wake's outlined cold helpers
-        check_unit "$arch" "$target" "$extra" "$dir" "$cfg" "wake_registered_cold" &
-        pids+=("$!")
-        check_unit "$arch" "$target" "$extra" "$dir" "$cfg" "wake_fallback" &
+        check_unit "$arch" "$target" "$extra" "$dir" "$cfg" "wake_impl_cold" &
         pids+=("$!")
 
-        check_unit "$arch" "$target" "$extra" "$dir" "$cfg" "register_cold" &
-        pids+=("$!")
-
-        check_unit "$arch" "$target" "$extra" "$dir" "$cfg" "register_fallback" &
+        check_unit "$arch" "$target" "$extra" "$dir" "$cfg" "register_impl_cold" &
         pids+=("$!")
     done
 

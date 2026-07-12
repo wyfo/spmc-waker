@@ -6,14 +6,20 @@ use std::{
 };
 
 #[cfg(synchronized)]
-type Mode = spmc_waker::Synchronized;
+type S = spmc_waker::synchronization::Synchronized;
 #[cfg(sequential)]
-type Mode = spmc_waker::Sequential;
+type S = spmc_waker::synchronization::Sequential;
 #[cfg(unsynchronized)]
-type Mode = spmc_waker::Unsynchronized;
+type S = spmc_waker::synchronization::Unsynchronized;
 
 const CACHED: bool = cfg!(cached);
-type SpmcWaker = spmc_waker::SpmcWaker<Mode, CACHED>;
+
+#[cfg(strict)]
+type R = spmc_waker::registration::Strict;
+#[cfg(unchecked)]
+type R = spmc_waker::registration::Unchecked;
+
+type SpmcWaker = spmc_waker::SpmcWaker<S, CACHED, R>;
 
 #[unsafe(no_mangle)]
 fn asm_wake_asm(spmc: &SpmcWaker) {
@@ -25,6 +31,7 @@ fn asm_wake_cold_asm(spmc: &SpmcWaker) {
     spmc.wake_cold();
 }
 
+#[cfg_attr(not(unchecked), allow(unused_unsafe))]
 #[unsafe(no_mangle)]
 unsafe fn asm_poll_wait_until_asm(
     spmc: &SpmcWaker,
@@ -34,34 +41,23 @@ unsafe fn asm_poll_wait_until_asm(
     unsafe { spmc.poll_wait_until(cx, |_| condition.load(Relaxed)) }
 }
 
-#[unsafe(no_mangle)]
-unsafe fn asm_try_register_asm(spmc: &SpmcWaker, waker: &Waker) -> bool {
-    unsafe { spmc.try_register(waker) }
-}
-
+#[cfg_attr(not(unchecked), allow(unused_unsafe))]
 #[unsafe(no_mangle)]
 unsafe fn asm_register_asm(spmc: &SpmcWaker, waker: &Waker) {
-    unsafe { spmc.register(waker) }
+    unsafe { spmc.register(waker) };
 }
 
 #[unsafe(no_mangle)]
-unsafe fn asm_unregister_asm(spmc: &SpmcWaker) -> bool {
-    unsafe { spmc.unregister() }
+unsafe fn asm_unregister_asm(registered: spmc_waker::RegisteredWaker<'_, S, CACHED, R>) {
+    registered.unregister();
 }
 
 #[unsafe(no_mangle)]
-fn asm_has_waker_registered_asm(spmc: &SpmcWaker) -> bool {
-    spmc.has_waker_registered()
+fn asm_registered_asm(spmc: &SpmcWaker) -> Option<spmc_waker::RegisteredWaker<'_, S, CACHED, R>> {
+    spmc.registered()
 }
 
-#[cfg(not(cached))]
 #[unsafe(no_mangle)]
 fn asm_take_asm(spmc: &SpmcWaker) -> Option<Waker> {
     spmc.take()
-}
-
-#[cfg(not(cached))]
-#[unsafe(no_mangle)]
-fn asm_take_cold_asm(spmc: &SpmcWaker) -> Option<Waker> {
-    spmc.take_cold()
 }

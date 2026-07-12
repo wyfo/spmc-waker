@@ -1,4 +1,4 @@
-//! A lock-free synchronization primitive for task wakeup.
+//! A wait-free synchronization primitive for task wakeup.
 //!
 //! This crate provides [`SpmcWaker`], a single-producer, multiple-consumer (SPMC)
 //! atomic waker.
@@ -7,111 +7,105 @@
 //!
 //! - `portable-atomic`: use `portable-atomic` crate to provide functionality to
 //!   targets without atomics.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![warn(missing_docs)]
 #![warn(clippy::undocumented_unsafe_blocks)]
 #![no_std]
-#[cfg(doc)]
-extern crate std;
 
+#[cfg(miri)]
+use core::cell::Cell;
+#[cfg(not(loom))]
+#[cfg(not(feature = "portable-atomic"))]
+use core::sync::atomic;
 use core::{
-    convert::identity,
-    hint::assert_unchecked,
     marker::PhantomData,
+    mem,
     mem::ManuallyDrop,
     panic::{RefUnwindSafe, UnwindSafe},
-    pin::Pin,
     ptr,
-    sync::atomic::Ordering,
+    sync::atomic::Ordering::*,
     task::{Context, Poll, RawWakerVTable, Waker},
 };
 
+#[cfg(loom)]
+use ::loom::cell::Cell;
+#[cfg(loom)]
+use loom as atomic;
+#[cfg(not(loom))]
+#[cfg(feature = "portable-atomic")]
+use portable_atomic as atomic;
+
 use crate::{
-    loom::{
-        AtomicPtrExt,
-        cell::UnsafeCell,
-        hint::spin_loop,
-        sync::atomic::{AtomicPtr, Ordering::*},
+    atomic::{AtomicPtr, AtomicUsize, fence},
+    registration::{RegistrationMode, RegistrationPolicy, SafeRegistration, Strict, Unchecked},
+    state_machine::{
+        AtomicState, CACHED, FLAGS_MASK, REGISTERED, REGISTERING, REGISTRATION_INCR, State,
     },
-    state_machine::{NULL, READ_FALLBACK, REGISTERED, WAKING, is_fallback},
-    sync::SyncMode,
-    utils::{NOOP_PTR, TaggedPointerExt, UnsafeCellExt, WakerExt, handle_panic},
+    synchronization::{SyncMode, Synchronization, Synchronized},
+    utils::{ConfirmedWaker, PendingWaker, TaggedExt},
+    wait_until::{WaitUntil, WakeCondition},
 };
 
-#[cfg(all(debug_assertions, not(loom)))]
-mod exclusive;
-mod loom;
-mod state_machine;
-mod sync;
-mod utils;
-
-pub use sync::*;
-
-/// Truncate the `loom.trace` file (no-op unless the `LOOM_TRACE` env var is
-/// set); call at the start of every loom model iteration so the trace reflects
-/// only the failing interleaving.
 #[cfg(loom)]
-pub use crate::loom::trace::clear as clear_loom_trace;
+#[doc(hidden)]
+pub mod loom;
+pub mod registration;
+mod state_machine;
+pub mod synchronization;
+mod utils;
+pub mod wait_until;
 
 /// A synchronization primitive for task wakeup.
 ///
 /// `SpmcWaker` allows registering a task's [`Waker`] and waking the task atomically and
-/// concurrently from multiple threads. A single instance may be reused for any number of
-/// waker registrations/calls.
+/// concurrently from multiple threads. A single instance may be reused for any number of waker
+/// registrations/calls.
 ///
-/// `SpmcWaker` should be paired with a wake condition, met **before** waking the
-/// task, and checked **after** registering the task's waker to not miss a concurrent
-/// notification that happened before.
+/// `SpmcWaker` should be paired with a wake condition, met **before** waking the task, and checked
+/// **after** registering the task's waker to not miss a concurrent notification that happened
+/// before.
 ///
-/// `SpmcWaker` also provides a high-level async [`wait_until`](Self::wait_until), backed
-/// by [`poll_wait_until`](Self::poll_wait_until), which is often more optimized than
-/// manual registration through [`register`](Self::register).
+/// `SpmcWaker` also provides a high-level async [`wait_until`](Self::wait_until), backed by
+/// [`poll_wait_until`](Self::poll_wait_until), which is often more optimized than manual
+/// registration through [`register`](Self::register).
 ///
-/// Another optimization is to use [`wake_cold`](Self::wake_cold) instead of
-/// [`wake`](Self::wake) in hot path, especially when a waker is rarely expected
-/// to be registered, as it is more inlinable.
-///
-/// # Single-producer, multiple-consumer (SPMC)
-///
-/// `SpmcWaker` algorithm assumes a single thread registering a waker at a time.
-/// It is enforced by the methods' safety condition.
-///
-/// This assumption allows significant optimizations compared to an MPMC algorithm
-/// like [`AtomicWaker`].
+/// Another optimization is to use [`wake_cold`](Self::wake_cold) instead of [`wake`](Self::wake)
+/// in hot path, especially when a waker is rarely expected to be registered, as it is more
+/// inlinable.
 ///
 /// # Synchronization
 ///
-/// `SpmcWaker` has a generic `S` parameter which determines the synchronization
-/// guarantees. See [`Synchronization`] documentation for more details about its variants.
+/// `SpmcWaker` has a generic `S` parameter which determines the synchronization guarantees. See
+/// [`Synchronization`] documentation for more details about its variants.
 ///
-/// With the default [`Synchronized`], calling `register` "acquires" all memory
-/// "released" by calls to `wake` before the call to `register`. Later calls to `wake`
-/// will wake the registered waker.
+/// With the default [`Synchronized`], calling `register` "acquires" all memory "released" by calls
+/// to `wake` before the call to `register`. Later calls to `wake` will wake the registered waker.
 ///
 /// # Waker caching
 ///
-/// Most of the time, `SpmcWaker` is used in a single task, so the waker
-/// registered is always the same. That's why it provides a second generic
-/// parameter `CACHED`.
+/// Most of the time, `SpmcWaker` is used in a single task, so the waker registered is always the
+/// same. That's why it provides a second generic parameter `CACHING`.
 ///
-/// ### `CACHED=true` (the default)
-///
-/// The last waker registered is kept cached to avoid cloning it on the next
-/// registration. As a consequence, waking is done with [`Waker::wake_by_ref`].
-/// As wakers are often `Arc`s, caching avoids atomic RMW operations updating
-/// the reference counter.
-///
-/// ### `CACHED=false`
-///
-/// Waker is always cloned on registration, and the tasks are woken with
+/// With `CACHING=true`, the latest waker registered is kept cached to avoid cloning on the next
+/// registration. As a consequence, tasks are woken with [`Waker::wake_by_ref`] instead of
 /// [`Waker::wake`].
+///
+/// As wakers are often `Arc`s, caching avoids atomic RMW operations updating the reference counter.
+/// However, it adds an RMW operation to `SpmcWaker::wake`, so the benefit mostly concerns
+/// `SpmcWaker::register`.
+///
+/// # Single-producer, multiple-consumer (SPMC)
+///
+/// `SpmcWaker` algorithm assumes a single thread registering a waker at a time. The behavior
+/// in case of concurrent registration is determined by the generic parameter `R`, see
+/// [`RegistrationPolicy`].
+///
+/// Notably, `R=Unchecked` makes registration methods unsafe, but removes one RMW from `register`.
 ///
 /// # Progress guarantee
 ///
-/// Waker registration is wait-free, while task waking is lock-free (without taking
-/// into account waker clone/wake/drop operations).
-///
-/// When waker registration is only done through `try_register`, `wake` becomes
-/// wait-free, but registration then requires spinning until it succeeds.
+/// `SpmcWaker` algorithm is wait-free, so every operation is bounded by the underlying `Waker`
+/// operation.
 ///
 /// # Examples
 ///
@@ -166,8 +160,7 @@ pub use crate::loom::trace::clear as clear_loom_trace;
 ///
 ///     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
 ///         let waker = &self.0.waker;
-///         // SAFETY: mutable reference on non-cloneable `Waiter` ensures no concurrent call
-///         unsafe { waker.poll_wait_until(cx, |_| self.0.notified.load(Relaxed)) }
+///         waker.poll_wait_until(cx, |_| self.0.notified.load(Relaxed))
 ///     }
 /// }
 ///
@@ -176,80 +169,590 @@ pub use crate::loom::trace::clear as clear_loom_trace;
 ///     (waiter.notifier(), waiter)
 /// }
 /// ```
-///
-/// [`AtomicWaker`]: https://docs.rs/futures/latest/futures/task/struct.AtomicWaker.html
-// The struct can contains two wakers: a "main" one and a "fallback" one, split into a vtable and
-// a data fields. Main waker vtable pointer is tagged with the state machine state
 #[derive(Debug)]
-pub struct SpmcWaker<S: Synchronization = Synchronized, const CACHED: bool = true> {
+pub struct SpmcWaker<
+    S: Synchronization = Synchronized,
+    const CACHING: bool = false,
+    R: RegistrationPolicy = Strict,
+> {
+    /// `SpmcWaker` state, as documented in [`state_machine`] module.
+    state: AtomicState,
+    /// Waker data
+    data: AtomicPtr<()>,
+    /// Waker vtable
     vtable: AtomicPtr<RawWakerVTable>,
-    data: UnsafeCell<*const ()>,
-    fallback_data: AtomicPtr<()>,
-    fallback_vtable: AtomicPtr<RawWakerVTable>,
-    #[cfg(all(debug_assertions, not(loom)))]
-    exclusive: exclusive::Exclusive,
+    /// Ghost field used to check that a confirmed waker
+    /// correctly matches the registration it is supposed to.
+    #[cfg(any(loom, miri))]
+    store_epoch: AtomicUsize,
+    /// Ghost field used to check that `Waker::wake_by_ref` is
+    /// correctly synchronized with `Waker::drop`.
+    #[cfg(any(loom, miri))]
+    waker_cells: [Cell<u8>; 256], // 256 should cover any loom/miri test.
     _sync: PhantomData<S>,
+    _registration: PhantomData<R>,
 }
 
-// SAFETY: Cell accesses are synchronized through atomic vtable accesses
-unsafe impl<S: Synchronization, const CACHED: bool> Send for SpmcWaker<S, CACHED> {}
-// SAFETY: Cell accesses are synchronized through atomic vtable accesses
-unsafe impl<S: Synchronization, const CACHED: bool> Sync for SpmcWaker<S, CACHED> {}
-impl<S: Synchronization, const CACHED: bool> UnwindSafe for SpmcWaker<S, CACHED> {}
-impl<S: Synchronization, const CACHED: bool> RefUnwindSafe for SpmcWaker<S, CACHED> {}
+// SAFETY: loom/miri catch data races
+#[cfg(any(loom, miri))]
+unsafe impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> Sync
+    for SpmcWaker<S, CACHING, R>
+{
+}
 
-impl<S: Synchronization, const CACHED: bool> Drop for SpmcWaker<S, CACHED> {
+impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> UnwindSafe
+    for SpmcWaker<S, CACHING, R>
+{
+}
+impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> RefUnwindSafe
+    for SpmcWaker<S, CACHING, R>
+{
+}
+
+impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> Drop
+    for SpmcWaker<S, CACHING, R>
+{
     #[inline]
     fn drop(&mut self) {
-        let vtable = self.vtable.load_mut();
-        if CACHED || vtable.has(REGISTERED) {
-            // SAFETY: there is a waker registered or cached, with no concurrent access
-            // as per mutable reference
-            drop(unsafe { self.waker(vtable.unset(REGISTERED)) });
+        let state = self.state.load(Relaxed);
+        if state.has(REGISTERED) || (CACHING && state.has(CACHED)) {
+            drop(self.load_waker().confirm(state));
         }
     }
 }
 
-impl<S: Synchronization, const CACHED: bool> SpmcWaker<S, CACHED> {
+impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> SpmcWaker<S, CACHING, R> {
     /// Creates a new `SpmcWaker`.
     #[cfg_attr(loom, const_fn::const_fn(cfg(false)))]
     #[inline]
     pub const fn new() -> Self {
         Self {
-            vtable: AtomicPtr::new(NOOP_PTR),
-            data: UnsafeCell::new(ptr::null()),
-            fallback_vtable: AtomicPtr::new(ptr::null_mut()),
-            fallback_data: AtomicPtr::new(ptr::null_mut()),
-            #[cfg(all(debug_assertions, not(loom)))]
-            exclusive: exclusive::Exclusive::new(),
+            state: AtomicState::new(0),
+            vtable: AtomicPtr::new(ptr::null_mut()),
+            data: AtomicPtr::new(ptr::null_mut()),
+            #[cfg(any(loom, miri))]
+            store_epoch: AtomicUsize::new(0),
+            #[cfg(loom)]
+            waker_cells: core::array::from_fn(|_| Cell::new(0)),
+            #[cfg(miri)]
+            waker_cells: [const { Cell::new(0) }; _],
             _sync: PhantomData,
+            _registration: PhantomData,
         }
     }
 
-    /// # Safety
-    ///
-    /// `vtable` must point to a valid `&'static RawWakerVTable`.
-    /// Waker data must be safe to read, i.e., no concurrent write shall happen.
     #[inline(always)]
-    unsafe fn waker(&self, vtable: *mut RawWakerVTable) -> Waker {
-        debug_assert!(!vtable.has(REGISTERED | WAKING));
-        // SAFETY: as per function contract + data is always set together with vtable
-        // so they form a valid waker.
-        unsafe { Waker::new(self.data.read(), &*vtable) }
+    fn load_waker(&self) -> PendingWaker {
+        PendingWaker {
+            data: self.data.load(Relaxed),
+            vtable: self.vtable.load(Relaxed),
+            #[cfg(any(loom, miri))]
+            store_epoch: self.store_epoch.load(Relaxed),
+            #[cfg(any(loom, miri))]
+            waker_cells: &self.waker_cells,
+        }
     }
 
-    /// # Safety
-    ///
-    /// Fallback waker can be read at any moment, but must only be used
-    /// after acquiring its ownership
     #[inline(always)]
-    unsafe fn fallback_waker(&self) -> Waker {
-        let data = self.fallback_data.load(Relaxed);
-        let vtable = self.fallback_vtable.load(Relaxed);
-        // SAFETY: as per function contract
-        unsafe { Waker::new(data, &*vtable) }
+    fn store_waker(&self, waker: Waker, _state: &mut State) {
+        let waker = ManuallyDrop::new(waker);
+        self.data.store(waker.data().cast_mut(), Relaxed);
+        self.vtable.store(waker.vtable() as *const _ as _, Relaxed);
+        #[cfg(any(loom, miri))]
+        {
+            let epoch = state_machine::set_store_epoch(_state);
+            self.store_epoch.store(epoch, Relaxed);
+            self.waker_cells[epoch / REGISTRATION_INCR].set(0);
+        }
     }
 
+    #[inline(always)]
+    fn poll_wait_until_impl<F: FnMut(bool) -> W, W: WakeCondition>(
+        &self,
+        cx: &mut Context,
+        mut wake_condition: F,
+    ) -> Poll<W::Output> {
+        // Quick check to avoid registration if the wake condition is already met.
+        if let Some(out) = wake_condition(false).try_into_output() {
+            return Poll::Ready(out);
+        }
+        // Register the waker
+        let state = self.register_impl(cx.waker());
+        // Check the wake condition **after** registering the waker.
+        if let Some(out) = wake_condition(true).try_into_output() {
+            self.unregister_impl(state);
+            return Poll::Ready(out);
+        }
+        Poll::Pending
+    }
+
+    #[inline(always)]
+    fn register_impl(&self, waker: &Waker) -> State {
+        // Load the state. If CACHING, the state must be loaded with Acquire ordering
+        // to synchronize with the Release CAS setting the CACHED flag (which is supposed
+        // to be the common case); if R::SAFE, this is already done by `set_registering`.
+        // Otherwise, there is nothing to synchronize with, as `wake` takes the ownership
+        // of the registered waker, hence Relaxed ordering.
+        let mut state = self.state.load(if CACHING && !R::SAFE {
+            Acquire
+        } else {
+            Relaxed
+        });
+        // Set the REGISTERING flag if R::SAFE to prevent concurrent registrations.
+        if R::SAFE {
+            match self.set_registering(state) {
+                Ok(s) => state = s,
+                Err(s) => return s,
+            }
+        }
+        // If CACHING and the same waker is cached, then the state must just be
+        // set back to REGISTERED, no need to touch the waker.
+        if CACHING && state.has(CACHED) && self.load_waker().will_wake(waker) {
+            // The registration counter must still be incremented, even though the
+            // waker is untouched: with a state value identical to the previous
+            // registration, a waking thread could pair its acquire fence with the
+            // previous registration's store, then successfully claim this one, and
+            // use/drop the waker without synchronizing with the previous wake (ABA).
+            // The stored epoch is untouched, as the waker storage doesn't change
+            // (see state_machine module documentation).
+            let unflagged = state.unset(CACHED).wrapping_add(REGISTRATION_INCR);
+            self.register_waker(state, unflagged, None)
+        // if not CACHING and no waker is registered, then store it and update
+        // the state.
+        } else if !CACHING && !state.has(REGISTERED) {
+            self.register_waker(state, state, Some(waker))
+        // Other cases fall in cold path
+        } else {
+            self.register_impl_cold(waker, state)
+        }
+    }
+
+    #[inline]
+    fn set_registering(&self, mut state: State) -> Result<State, State> {
+        // Try setting the registering with a CAS loop (because it needs to
+        // clear other mutually exclusive flags).
+        while !state.has(REGISTERING) {
+            let new_state = state.clear(FLAGS_MASK).set(REGISTERING);
+            // Acquire ordering on success is mandatory because a waker may have been
+            // stored by another thread, so the synchronization is needed as the waker
+            // will be loaded right after.
+            match (self.state).compare_exchange_weak(state, new_state, Acquire, Relaxed) {
+                Ok(_) => return Ok(state),
+                Err(s) => state = s,
+            }
+        }
+        match R::MODE {
+            RegistrationMode::Strict => panic!("concurrent registration"),
+            // Lenient can't panic and must return a state to build a RegisteredWaker.
+            // By returning a previous registration count, we ensure the RegisteredWaker
+            // cannot be used for anything.
+            RegistrationMode::Lenient => Err(state
+                .unset(REGISTERING)
+                .wrapping_sub(REGISTRATION_INCR)
+                .set(REGISTERED)),
+            RegistrationMode::Unchecked => unreachable!(),
+        }
+    }
+
+    #[inline(always)]
+    fn register_waker(&self, state: State, unflagged_state: State, waker: Option<&Waker>) -> State {
+        let mut new_state = unflagged_state.set(REGISTERED);
+        if let Some(waker) = waker {
+            new_state = new_state.wrapping_add(REGISTRATION_INCR);
+            // Don't forget to reset the REGISTERING flag, even if it's not necessary for
+            // correctness, to not leave the SpmcWaker in a blocked state.
+            struct ResetRegistering<'a>(&'a AtomicState, State);
+            impl Drop for ResetRegistering<'_> {
+                fn drop(&mut self) {
+                    self.0.swap(self.1, SeqCst); // !ORDERING
+                }
+            }
+            let guard = R::SAFE.then(|| ResetRegistering(&self.state, state));
+            self.store_waker(waker.clone(), &mut new_state);
+            mem::forget(guard);
+        }
+        match S::MODE {
+            // Acquire ordering is necessary to synchronize with `wake`, so swap
+            // must be used. Release is necessary if waker has been stored.
+            // Otherwise, the swap write can be relaxed: a `wake` claiming this
+            // registration still acquires the data through the release sequence
+            // of the previous registration of the same waker, as every state
+            // updates are RMWs.
+            SyncMode::Synchronized => {
+                (self.state).swap(new_state, if waker.is_some() { AcqRel } else { Acquire });
+            }
+            // Storing the state with SeqCst is necessary for the pattern
+            // `store X; load Y || store Y; load X` to not miss any
+            // notification, where X is the wake condition and Y the state.
+            SyncMode::Sequential => self.state.store(new_state, SeqCst),
+            // Even if synchronization is handled by the user and no data is
+            // written, Release is still needed to synchronize with the initial
+            // data write, which happens before (either on the same thread with
+            // Unchecked, or in another thread with R::SAFE but with Acquire-Release
+            // synchronization). The store is in fact breaking the release-sequence
+            // headed by the initial store.
+            SyncMode::Unsynchronized => self.state.store(new_state, Release),
+        }
+        new_state
+    }
+
+    // Overwriting a registered/cached waker is expected to be rare, hence the `#[cold]` attribute.
+    #[cold]
+    fn register_impl_cold(&self, waker: &Waker, state: State) -> State {
+        if CACHING && !state.has(REGISTERED) {
+            // If a waker is cached, but doesn't match the new one being registered (because in
+            // cold path), it is simply overwritten and dropped.
+            return if state.has(CACHED) {
+                let old_waker = self.load_waker();
+                debug_assert!(!old_waker.will_wake(waker));
+                let registered = self.register_waker(state, state.unset(CACHED), Some(waker));
+                drop(old_waker.confirm(state));
+                registered
+            // Otherwise, the waker is unregistered but the waking thread may try to update the
+            // state back to CACHED. This is not possible with R::SAFE (because of REGISTERING
+            // flag), so a new waker can simply be registered.
+            } else if R::SAFE {
+                self.register_waker(state, state, Some(waker))
+            // However, concurrent update may happen with Unchecked and must be caught.
+            // This is done by registering the new waker with a swap.
+            } else {
+                debug_assert!(!state.has(FLAGS_MASK));
+                let old_waker = self.load_waker();
+                let mut new_state = state.set(REGISTERED).wrapping_add(REGISTRATION_INCR);
+                self.store_waker(waker.clone(), &mut new_state);
+                // Ordering matches those of `register_waker` for the same reasons.
+                // (The ordering could be factorized with a unique swap, but it would
+                // mess with ordering downgrading parsing)
+                let old_state = match S::MODE {
+                    SyncMode::Synchronized => self.state.swap(new_state, AcqRel),
+                    SyncMode::Sequential => self.state.swap(new_state, SeqCst),
+                    SyncMode::Unsynchronized => self.state.swap(new_state, Release),
+                };
+                // If the old waker was concurrently cached, drop it, but emit an Acquire fence
+                // first (if not already handled by the swap ordering) to ensure `wake_by_ref`
+                // happens before the drop.
+                if old_state.has(CACHED) {
+                    if matches!(S::MODE, SyncMode::Unsynchronized) {
+                        fence(Acquire);
+                    }
+                    drop(old_waker.confirm(old_state));
+                }
+                new_state
+            };
+        }
+        // A waker is registered, check first if it can be reused.
+        debug_assert!(state.has(REGISTERED));
+        let old_waker = self.load_waker();
+        if old_waker.will_wake(waker) {
+            // REGISTERING flag must be unset.
+            if R::SAFE {
+                self.register_waker(state, state.unset(REGISTERED), None);
+            }
+            state
+        // Otherwise, the waker must be replaced. With R::SAFE, REGISTERING flag protects against
+        // concurrent `wake`, so the new waker can be overwritten.
+        } else if R::SAFE {
+            let registered = self.register_waker(state, state.unset(REGISTERED), Some(waker));
+            drop(old_waker.confirm(state));
+            registered
+        // In case where concurrent `wake` can happen and read the old waker, it is not possible to
+        // overwrite this one; it must be unregistered first, using a swap to catch if it has
+        // already been unregistered (or cached).
+        } else {
+            let new_state = state.unset(REGISTERED);
+            // Relaxed ordering is fine to set the state to unregistered. A concurrent `wake` may
+            // load a stale REGISTERED, but its CAS would fail right after.
+            let old_state = self.state.swap(new_state, Relaxed);
+            debug_assert!(old_state & !FLAGS_MASK == state & !FLAGS_MASK);
+            // If the old waker is still registered, it is dropped. It must be dropped before
+            // cloning the new waker, as clone may panic and the old waker would then be leaked.
+            if old_state.has(REGISTERED) {
+                drop(old_waker.confirm(old_state));
+            // If the waker has been cached after a concurrent `wake`, it is dropped after an
+            // Acquire fence to ensure `wake_by_ref` happens before the drop.
+            } else if CACHING && old_state.has(CACHED) {
+                fence(Acquire);
+                drop(old_waker.confirm(old_state));
+            // Otherwise, if waker ownership has been acquired but there is still a chance that it
+            // might be concurrently cached, it must be cached first using a CAS. Registering the
+            // new waker with a swap (as done above) is tempting, but as explained before, dropping
+            // the old waker must be done before cloning the new one.
+            } else if CACHING {
+                debug_assert!(!old_state.has(FLAGS_MASK));
+                let cached = old_state.set(CACHED);
+                // If the CAS succeeds, then `wake` CAS will fail and the waker will be dropped
+                // subsequently. Otherwise, waker was already cached and the ownership has been
+                // given back, so it must be dropped here.
+                if let Err(old_state) =
+                    (self.state).compare_exchange(old_state, cached, Relaxed, Acquire)
+                {
+                    debug_assert_eq!(old_state, cached);
+                    drop(old_waker.confirm(cached));
+                }
+            } else {
+                debug_assert!(!old_state.has(FLAGS_MASK));
+            }
+            // Then the new waker can be registered.
+            self.register_waker(new_state, new_state, Some(waker))
+        }
+    }
+
+    #[inline(always)]
+    fn unregister_impl(&self, state: State) {
+        // Try unregistering the waker, caching it if it is enabled, or dropping it.
+        debug_assert!(state.has(REGISTERED) && !state.has(CACHED | REGISTERING));
+        let mut new_state = state.unset(REGISTERED);
+        if CACHING {
+            new_state = new_state.set(CACHED);
+        }
+        // If no caching, load the waker before claiming its ownership.
+        let waker = (!CACHING).then(|| self.load_waker());
+        match (self.state).compare_exchange(state, new_state, Relaxed, Relaxed) {
+            Ok(_) if !CACHING => drop(waker.unwrap().confirm(state)),
+            _ => {}
+        }
+    }
+
+    /// Returns a [`RegisteredWaker`] token to manipulate the latest registered
+    /// waker, if there is one.
+    ///
+    /// This provides a best-effort snapshot: a concurrent [`wake`] call may
+    /// consume the waker right after this returns `Some`, and a concurrent
+    /// [`register`] call may store one right after this returns `None`.
+    ///
+    /// Calling `registered` then `RegisteredWaker::wake` is guaranteed to
+    /// provide the same synchronization as calling `wake` alone.
+    ///
+    /// This method can be used to do additional things before/after waking a
+    /// task, like strengthening the ordering of the wake condition.
+    ///
+    /// [`register`]: Self::register
+    /// [`wake`]: Self::wake
+    #[inline]
+    pub fn registered(&self) -> Option<RegisteredWaker<'_, S, CACHING, R>> {
+        let (state, released) = self.registered_impl()?;
+        Some(RegisteredWaker::new(self, state, released))
+    }
+
+    fn registered_impl(&self) -> Option<(State, S::Released)> {
+        // Load the state with ordering depending on the synchronization:
+        // - Sequential requires a SeqCst load
+        // - Synchronized requires a RMW release on the state, but this one can be done to take
+        //   the ownership of the registered waker; the initial load before the RMW can thus be
+        //   Relaxed
+        // - Unsynchronized has it synchronization handled by the wake condition, the load can be
+        //   Relaxed
+        let mut state = self.state.load(match S::MODE {
+            SyncMode::Sequential => SeqCst,
+            _ => Relaxed,
+        });
+        let mut released = false;
+        // If S::SYNC and there is no waker registered, a Release RMW must still be executed.
+        // As the state doesn't need to be modified, `fetch_add(0)` can be used, as it has the
+        // advantage to be optimized on x86 architectures.
+        if S::SYNC && !state.has(REGISTERED) {
+            state = self.state.fetch_add(0, Release);
+            released = true;
+        }
+        // No waker registered, return None.
+        if !state.has(REGISTERED) {
+            return None;
+        }
+        // The waker will be loaded to be wakened, so an Acquire fence must be emitted to synchronize
+        // with the Release store/swap in `register`, ensuring the pointers loaded will be
+        // up-to-date (they might even be too recent, but ownership claim would fail in that case).
+        // It would be possible to replace the fence by an Acquire ordering on the previous load,
+        // but the fence has multiple advantages: it is conditional, and the compilation of
+        // `ldr + dmb ishld` can have better performance than `ldar` on some aarch64 architectures,
+        // especially if the `ldar` is following a `stlr`, which it should in the common case.
+        // (Recent aarch64 compiles Acquire load to `ldapr`, which doesn't suffer from the
+        // combination with `stlr`, but the code is kept simpler this way. The optimization might
+        // still be implemented in the future).
+        // Also, for `wake_cold`, executing the fence before calling the cold function enables to
+        // have it done in parallel to the function load, reducing latency.
+        if !matches!(S::MODE, SyncMode::Sequential) {
+            fence(Acquire);
+        }
+        Some((state, released.into()))
+    }
+
+    /// Consumes the latest `Waker` registered and returns it.
+    #[inline]
+    pub fn take(&self) -> Option<Waker> {
+        let (state, released) = self.registered_impl()?;
+        let (waker, _) = self.take_impl(state, released)?;
+        #[cfg(any(loom, miri))]
+        let waker = waker.get();
+        Some(waker)
+    }
+
+    #[inline(always)]
+    fn take_impl(
+        &self,
+        mut state: State,
+        mut released: S::Released,
+    ) -> Option<(ConfirmedWaker, State)> {
+        // Claim the waker ownership with a CAS.
+        debug_assert!(state.has(REGISTERED));
+        loop {
+            // Load the waker before updating the state. If the update succeeds, then
+            // the waker is ensured to be valid.
+            let waker = self.load_waker();
+            let new_state = state.unset(REGISTERED);
+            if ((self.state).compare_exchange(state, new_state, Release, Relaxed)).is_ok() {
+                return Some((waker.confirm(state), new_state));
+            }
+            // Same as registered_impl. With S::SYNC, if the update failed, a Release RMW must
+            // still be executed if it has not been done before.
+            if S::SYNC && !released.into() {
+                state = self.state.fetch_add(0, Release);
+                released = true.into();
+                // Try claiming the new waker if there is one.
+                if state.has(REGISTERED) {
+                    // Same as registered_impl, the fence is necessary to load the waker.
+                    if !matches!(S::MODE, SyncMode::Sequential) {
+                        fence(Acquire);
+                    }
+                    continue;
+                }
+            }
+            return None;
+        }
+    }
+
+    /// Consumes the latest `Waker` registered and wakes its task.
+    #[inline]
+    pub fn wake(&self) {
+        if let Some((state, released)) = self.registered_impl() {
+            self.wake_impl(state, released);
+        }
+    }
+
+    /// Same as [`wake`](Self::wake), but with the waking path marked `#[cold]`.
+    ///
+    /// This allows the method to inline more effectively. Prefer this over
+    /// `wake` when waking is the uncommon case.
+    #[inline]
+    pub fn wake_cold(&self) {
+        if let Some((state, released)) = self.registered_impl() {
+            self.wake_impl_cold(state, released);
+        }
+    }
+
+    #[inline(always)]
+    fn wake_impl(&self, state: State, released: S::Released) {
+        if let Some((waker, state)) = self.take_impl(state, released) {
+            // If CACHING is enabled, use `Waker::wake_by_ref` and try to update the state back
+            // with the CACHED state, giving back the ownership of the waker. If it fails, drop it.
+            if CACHING {
+                waker.wake_by_ref();
+                let cached = state.set(CACHED);
+                // Use Release ordering so `wake_by_ref` can happen before a further drop.
+                if ((self.state).compare_exchange(state, cached, Release, Relaxed)).is_ok() {
+                    mem::forget(waker);
+                }
+            } else {
+                waker.wake();
+            }
+        }
+    }
+
+    #[cold]
+    fn wake_impl_cold(&self, state: State, released: S::Released) {
+        self.wake_impl(state, released);
+    }
+}
+
+impl<S: Synchronization, const CACHING: bool, R: SafeRegistration> SpmcWaker<S, CACHING, R> {
+    /// Wait until the given wake condition is met.
+    ///
+    /// The method accepts a closure which takes in parameter a boolean telling whether the waker
+    /// is already registered when the closure is called. In fact, the closure is executed a first
+    /// time before registering the waker (see [`poll_wait_until`](Self::poll_wait_until)
+    /// documentation). This parameter can be used to relax the first wake condition's check when a
+    /// non-default [`Synchronization`] is used.
+    ///
+    /// Notifier threads should call [`wake`](Self::wake) (or [`wake_cold`](Self::wake_cold))
+    /// after wake condition is met.
+    ///
+    /// # Panics
+    ///
+    /// Polling the returned future calls `poll_wait_until` and inherits its panic condition.
+    /// Basically, only a single thread should await a wake condition at a time.
+    #[inline]
+    pub fn wait_until<F: FnMut(bool) -> W, W: WakeCondition>(
+        &self,
+        wake_condition: F,
+    ) -> WaitUntil<'_, F, S, CACHING, R> {
+        WaitUntil::new(self, wake_condition)
+    }
+
+    /// Returns `Poll::Ready` if the wake condition is met, or registers
+    /// the task's waker to be notified.
+    ///
+    /// The method accepts a closure which takes in parameter a boolean telling whether the waker
+    /// is already registered when the closure is called. This parameter can be used to relax the
+    /// first wake condition's check when a non-default [`Synchronization`] is used.
+    ///
+    /// Notifier threads should call [`wake`](Self::wake) (or [`wake_cold`](Self::wake_cold))
+    /// after wake condition is met.
+    ///
+    /// It is equivalent to the following code:
+    /// ```
+    /// # use std::task::{Context, Poll};
+    /// # use spmc_waker::SpmcWaker;
+    /// # fn poll_wait_until(spmc_waker: &SpmcWaker, cx: &mut Context, wake_condition: impl Fn(bool) -> bool) -> Poll<()> {
+    ///     // quick check to avoid registration if the wake condition is already met
+    ///     if wake_condition(false) {
+    ///         return Poll::Ready(());
+    ///     }
+    ///     // register the waker
+    ///     let registered = spmc_waker.register(cx.waker());
+    ///     // check the wake condition **after** registering the waker
+    ///     if wake_condition(true) {
+    ///         // unregister the waker to avoid spurious wakeups
+    ///         registered.unregister();
+    ///         return Poll::Ready(());
+    ///     }
+    ///     Poll::Pending
+    /// # }
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// This method calls `register` and inherits its panic condition.
+    #[inline]
+    pub fn poll_wait_until<F: FnMut(bool) -> W, W: WakeCondition>(
+        &self,
+        cx: &mut Context,
+        wake_condition: F,
+    ) -> Poll<W::Output> {
+        self.poll_wait_until_impl(cx, wake_condition)
+    }
+
+    /// Registers a [`Waker`] whose task will be woken by the next call to `wake`.
+    ///
+    /// The waker overwrites any previously registered one, and is consumed by `wake`.
+    /// As a consequence, `register` should be called **each** time a task requires a
+    /// wakeup.
+    ///
+    /// Returns a [`RegisteredWaker`] token, which can be used to unregister the waker if
+    /// the wake condition is met, avoiding spurious wakeup.
+    ///
+    /// See [`poll_wait_until`](Self::poll_wait_until) documentation about how to use
+    /// `register`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this method is called concurrently from multiple threads unless `R=Lenient`,
+    /// in which case registration might fail silently.
+    #[inline]
+    pub fn register(&self, waker: &Waker) -> RegisteredWaker<'_, S, CACHING, R> {
+        RegisteredWaker::new(self, self.register_impl(waker), false)
+    }
+}
+
+impl<S: Synchronization, const CACHING: bool> SpmcWaker<S, CACHING, Unchecked> {
     /// Wait until the given wake condition is met.
     ///
     /// The method accepts a closure which takes in parameter a boolean telling whether the waker
@@ -269,11 +772,8 @@ impl<S: Synchronization, const CACHED: bool> SpmcWaker<S, CACHED> {
     pub unsafe fn wait_until<F: FnMut(bool) -> W, W: WakeCondition>(
         &self,
         wake_condition: F,
-    ) -> WaitUntil<'_, F, S, CACHED> {
-        WaitUntil {
-            wake: self,
-            wake_condition,
-        }
+    ) -> WaitUntil<'_, F, S, CACHING, Unchecked> {
+        WaitUntil::new(self, wake_condition)
     }
 
     /// Returns `Poll::Ready` if the wake condition is met, or registers
@@ -286,716 +786,113 @@ impl<S: Synchronization, const CACHED: bool> SpmcWaker<S, CACHED> {
     /// Notifier threads should call [`wake`](Self::wake) (or [`wake_cold`](Self::wake_cold))
     /// after wake condition is met.
     ///
-    /// It is equivalent to the following code (but more optimized):
-    /// ```ignore
-    /// // quick check to avoid registration if the wake condition is already met.
-    /// if wake_condition(false) {
-    ///     return Poll::Ready(());
-    /// }
-    /// // try registering the waker
-    /// if !self.try_register(cx.waker()) {
-    ///     // a concurrent wake is ongoing, the wake condition should be met
+    /// It is equivalent to the following code:
+    /// ```
+    /// # use std::task::{Context, Poll};
+    /// # use spmc_waker::SpmcWaker;
+    /// # fn poll_wait_until(spmc_waker: &SpmcWaker, cx: &mut Context, wake_condition: impl Fn(bool) -> bool) -> Poll<()> {
+    ///     // quick check to avoid registration if the wake condition is already met.
     ///     if wake_condition(false) {
     ///         return Poll::Ready(());
     ///     }
-    ///     // a previous wake didn't terminate, pause before retrying
-    ///     spin_loop();
-    ///     // force waker registration
-    ///     self.register(cx.waker());
-    /// }
-    /// // check the wake condition **after** registering the waker
-    /// // to not miss any notification
-    /// if wake_condition(true) {
-    ///     // unregister the waker to avoid spurious wakeups
-    ///     self.unregister();
-    ///     return Poll::Ready(());
-    /// }
-    /// Poll::Pending
+    ///     // register the waker
+    ///     let registered = spmc_waker.register(cx.waker());
+    ///     // check the wake condition **after** registering the waker
+    ///     if wake_condition(true) {
+    ///         // unregister the waker to avoid spurious wakeups
+    ///         registered.unregister();
+    ///         return Poll::Ready(());
+    ///     }
+    ///     Poll::Pending
+    /// # }
     /// ```
     ///
     /// # Safety
     ///
-    /// All waker registration methods must not be called concurrently with each other from
-    /// multiple threads.
+    /// This method calls `register` and inherits its safety condition.
     #[inline]
     pub unsafe fn poll_wait_until<F: FnMut(bool) -> W, W: WakeCondition>(
         &self,
         cx: &mut Context,
-        mut wake_condition: F,
+        wake_condition: F,
     ) -> Poll<W::Output> {
-        #[cfg(all(debug_assertions, not(loom)))]
-        let _guard = self.exclusive.check();
-        // Quick check to avoid registration if the wake condition is already met.
-        if let Some(out) = wake_condition(false).try_into_output() {
-            return Poll::Ready(out);
-        }
-        // Try registering the waker with fast path.
-        match self.register_inlined(cx.waker()) {
-            // Check the wake condition **after** registering the waker
-            // to not miss any notification.
-            Ok(vtable) => match wake_condition(true).try_into_output() {
-                Some(out) => {
-                    self.unregister_inlined(vtable);
-                    Poll::Ready(out)
-                }
-                None => Poll::Pending,
-            },
-            Err(vtable) => self.poll_wait_until_cold(cx.waker(), vtable, wake_condition),
-        }
+        self.poll_wait_until_impl(cx, wake_condition)
     }
 
-    #[cold]
-    fn poll_wait_until_cold<F: FnMut(bool) -> W, W: WakeCondition>(
-        &self,
-        waker: &Waker,
-        vtable: *mut RawWakerVTable,
-        mut wake_condition: F,
-    ) -> Poll<W::Output> {
-        // Try registering the waker.
-        if !self.register_cold(waker, vtable, false, true) {
-            // A concurrent wake is ongoing, the wake condition should be met.
-            if let Some(out) = wake_condition(false).try_into_output() {
-                return Poll::Ready(out);
-            }
-            // A previous wake didn't terminate, pause before retrying.
-            spin_loop();
-            // Force waker registration.
-            self.register_cold(waker, vtable, true, true);
-        }
-        // Check the wake condition **after** registering the waker
-        // to not miss any notification.
-        if let Some(out) = wake_condition(true).try_into_output() {
-            // Unregister the waker to avoid spurious wakeups.
-            if let Some(vtable) = self.unregister_vtable() {
-                self.unregister_inlined(vtable);
-            }
-            return Poll::Ready(out);
-        }
-        Poll::Pending
-    }
-
-    /// Registers the waker to be notified on calls to `wake`.
+    /// Registers a [`Waker`] whose task will be woken by the next call to `wake`.
     ///
-    /// The new task will take place of any previous tasks that were registered
-    /// by previous calls to `register`. Any calls to `wake` that happen after
-    /// a call to `register` (as defined by the memory ordering rules), will
-    /// notify the `register` caller's task and deregister the waker from future
-    /// notifications. Because of this, callers should ensure `register` gets
-    /// invoked with a new `Waker` **each** time they require a wakeup.
+    /// The waker overwrites any previously registered one, and is consumed by `wake`.
+    /// As a consequence, `register` should be called **each** time a task requires a
+    /// wakeup.
     ///
-    /// It is safe to call `register` with multiple other threads concurrently
-    /// calling `wake`. This will result in the `register` caller's current
-    /// task being notified once.
+    /// Returns a [`RegisteredWaker`] token, which can be used to unregister the waker if
+    /// the wake condition is met, avoiding spurious wakeup.
+    ///
+    /// See [`poll_wait_until`](Self::poll_wait_until) documentation about how to use
+    /// `register`.
     ///
     /// # Safety
     ///
-    /// All waker registration methods must not be called concurrently with each other from
-    /// multiple threads.
+    /// This method must not be called concurrently from multiple threads.
     #[inline]
-    pub unsafe fn register(&self, waker: &Waker) {
-        #[cfg(all(debug_assertions, not(loom)))]
-        let _guard = self.exclusive.check();
-        if let Err(vtable) = self.register_inlined(waker) {
-            self.register_cold(waker, vtable, true, true);
-        }
-    }
-
-    /// Tries registering the waker, fails if a concurrent `wake` is currently executing.
-    ///
-    /// See [`register`](Self::register). Returns `true` if registration succeeded.
-    ///
-    /// When `wake` is executed concurrently, there is a great chance that the wake
-    /// condition is met. In that case, forcing the registration of the waker like
-    /// `register` does can be counter-productive. `register` should however be
-    /// called if the wake condition is still not met — is it also possible
-    /// to spin a bit to wait for `wake` to finish.
-    ///
-    /// # Safety
-    ///
-    /// All waker registration methods must not be called concurrently with each other from
-    /// multiple threads.
-    #[inline]
-    pub unsafe fn try_register(&self, waker: &Waker) -> bool {
-        #[cfg(all(debug_assertions, not(loom)))]
-        let _guard = self.exclusive.check();
-        match self.register_inlined(waker) {
-            Ok(_) => true,
-            Err(vtable) => self.register_cold(waker, vtable, false, true),
-        }
-    }
-
-    #[inline(always)]
-    fn register_inlined(&self, waker: &Waker) -> Result<*mut RawWakerVTable, *mut RawWakerVTable> {
-        // Load vtable with Acquire ordering to synchronize data access with `wake`.
-        // For SYNC=true, it also ensures the synchronization in case of early
-        // return; otherwise, synchronization is done through the RMW setting
-        // the vtable.
-        let vtable = self.vtable.load(Acquire);
-        if !CACHED && !vtable.has(REGISTERED | WAKING) {
-            Ok(self.register_vtable(&ManuallyDrop::new(waker.clone()), true))
-        // No need to check `!vtable.has(REGISTERED | WAKING)` as it is implied by vtable equality.
-        } else if CACHED
-            && waker.vtable_ptr() == vtable
-            // SAFETY: vtable is unregistered, so its Acquire load cannot be stale,
-            // so it synchronizes with previous accesses
-            && waker.data() == unsafe { self.data.read() }
-        {
-            Ok(self.register_vtable(waker, false))
-        } else {
-            Err(vtable)
-        }
-    }
-
-    #[inline(always)]
-    fn register_vtable(&self, waker: &Waker, write_data: bool) -> *mut RawWakerVTable {
-        if write_data {
-            // SAFETY: vtable is unregistered, so its Acquire load cannot be stale,
-            // so it synchronizes with previous accesses
-            unsafe { self.data.write(waker.data()) };
-        }
-        let registered = waker.vtable_ptr().set(REGISTERED);
-        // TRANSITION: V -> V|R
-        match S::MODE {
-            // Acquire ordering is necessary to synchronize with `wake`, so swap
-            // must be used. Release is necessary if waker data has been set.
-            // Otherwise, the swap write can be relaxed: a `wake` claiming this
-            // registration still acquires the data through the release sequence
-            // of the previous registration of the same waker, as every vtable
-            // updates are RMWs.
-            SyncMode::Synchronized => {
-                (self.vtable).swap(registered, if write_data { AcqRel } else { Acquire });
-            }
-            // Storing the vtable with SeqCst is necessary for the pattern
-            // `store X; load Y || store Y; load X` to not miss any
-            // notification, where X is the wake condition and Y the vtable.
-            SyncMode::Sequential => self.vtable.store(registered, SeqCst),
-            // Even if synchronization is handled by the user and no data is
-            // written, Release is still needed to synchronize with the initial
-            // data write, which happens before on the same thread. The store is
-            // in fact breaking the release-sequence headed by the initial store.
-            SyncMode::Unsynchronized => (self.vtable).store(registered, Release),
-        }
-        registered
-    }
-
-    // Overwriting a registered/cached waker is expected to be rare, hence the `#[cold]` attribute.
-    #[cold]
-    fn register_cold(
-        &self,
-        waker: &Waker,
-        mut vtable: *mut RawWakerVTable,
-        force: bool,
-        clone: bool,
-    ) -> bool {
-        // If the waker is already registered, there is no need to replace it,
-        // and there is no `wake` to synchronize with: either the loaded vtable
-        // is up to date, and a preceding `wake` would have consumed the
-        // registration; or it is stale and a concurrent `wake` is consuming it,
-        // but its pending `wake_by_ref` call targets this same waker, so the
-        // task will be polled again — and that poll happens after the wake's
-        // claim, so it cannot load the stale registration a second time.
-        if clone
-            && waker.vtable_ptr().set(REGISTERED) == vtable
-            // SAFETY: vtable is registered, so its Acquire load cannot be stale,
-            // so it synchronizes with previous accesses
-            && waker.data() == unsafe { self.data.read() }
-        {
-            return true;
-        }
-        // A concurrent `wake` may be happening.
-        if vtable.has(WAKING) {
-            return force && self.register_fallback(vtable, waker, clone);
-        }
-        // Unregister the registered waker if there is one.
-        if vtable.has(REGISTERED) {
-            if is_fallback(vtable) {
-                return self.register_fallback(vtable, waker, clone);
-            }
-            // If CAS succeeds, then there is nothing to synchronize with, SYNC=true being
-            // handled in `register_vtable`. On the other hand, CAS failure means a `wake`
-            // in between and requires Acquire ordering to synchronize data access.
-            // TRANSITION: V|R -> V
-            match (self.vtable).compare_exchange(vtable, NOOP_PTR, Relaxed, Acquire) {
-                Ok(_) => {}
-                // A concurrent `wake` happened, return if registration is not forced,
-                // as wake condition is surely met.
-                Err(_) if !force => return false,
-                // Otherwise, if `wake` is still ongoing, register a fallback waker.
-                Err(vtable) if vtable.has(WAKING) => {
-                    return self.register_fallback(vtable, waker, clone);
-                }
-                // `wake` has completed and the waker has been unregistered.
-                Err(v) => {
-                    debug_assert_eq!(v, vtable.unset(REGISTERED));
-                    vtable = v;
-                }
-            }
-        }
-        let waker_clone;
-        let waker = if clone {
-            // If clone panics and there was a registered waker, it is restored.
-            let restore_waker = || {
-                if vtable.has(REGISTERED) {
-                    self.vtable.swap(vtable, SeqCst); // !ORDERING
-                }
-            };
-            waker_clone = ManuallyDrop::new(handle_panic(|| waker.clone(), restore_waker));
-            &waker_clone
-        } else {
-            waker
-        };
-        // The waker will be overwritten. If there was a waker cached or registered,
-        // it has to be dropped.
-        // SAFETY: No concurrent `register` can happen, and there is no fallback waker
-        // registered, so `wake` can't modify data
-        let _prev_waker = (CACHED || vtable.has(REGISTERED))
-            .then(|| unsafe { self.waker(vtable.unset(REGISTERED)) });
-        self.register_vtable(waker, true);
-        true
-    }
-
-    fn register_fallback(
-        &self,
-        mut vtable: *mut RawWakerVTable,
-        waker: &Waker,
-        clone: bool,
-    ) -> bool {
-        let waker_clone;
-        let waker = if clone {
-            waker_clone = ManuallyDrop::new(waker.clone());
-            &waker_clone
-        } else {
-            waker
-        };
-        let mut _waker_to_drop = None;
-        // If there already is a fallback waker registered, vtable must be reset to NULL
-        // to reset it and prevent the current one from being concurrently read.
-        if is_fallback(vtable) {
-            // The loop is bounded, because `register` is wait-free.
-            loop {
-                debug_assert!(vtable.has(REGISTERED) || vtable.has(REGISTERED | WAKING));
-                // Relaxed is fine for success, as there is nothing to synchronize with.
-                // Failure requires Acquire to synchronize waker data access before
-                // overwriting it.
-                // TRANSITION: N|R -> N / N|R|W -> N / RF|R -> N / RF|R|W -> N
-                match (self.vtable).compare_exchange(vtable, NULL, Relaxed, Acquire) {
-                    Ok(_) => break,
-                    Err(v) if is_fallback(v) => vtable = v,
-                    // CAS failed with a valid vtable pointer, so no fallback waker
-                    // is registered past this point. The main waker can be overwritten.
-                    // The recursion is finite, because `register` is wait-free.
-                    Err(v) => return self.register_cold(waker, v, true, false),
-                }
-            }
-            vtable = NULL;
-            // SAFETY: vtable has been reset to NULL, so fallback waker will not be
-            // used by waking thread and can be safely dropped here
-            _waker_to_drop = Some(unsafe { self.fallback_waker() });
-        }
-        debug_assert!((!is_fallback(vtable) && vtable.has(REGISTERED | WAKING)) || vtable == NULL);
-        self.fallback_data.store(waker.data().cast_mut(), Relaxed);
-        (self.fallback_vtable).store(waker.vtable_ptr(), Relaxed);
-        // Register the fallback waker, using the same ordering as `register_vtable`.
-        let ordering = match S::MODE {
-            SyncMode::Synchronized => AcqRel,
-            SyncMode::Sequential => SeqCst,
-            SyncMode::Unsynchronized => Release,
-        };
-        // TRANSITION: V/R/W -> N|R / N -> N|R
-        if let Err(vtable) =
-            (self.vtable).compare_exchange(vtable, NULL.set(REGISTERED), ordering, Acquire)
-        {
-            debug_assert!(!is_fallback(vtable) && !vtable.has(REGISTERED | WAKING));
-            // Registration fails, so main waker must be unregistered and will be
-            // overwritten. There is no point to reuse cached waker as the waker
-            // in argument has already been cloned.
-            // The recursion is finite, because `register` is wait-free.
-            return self.register_cold(waker, vtable, true, false);
-        }
-        true
-    }
-
-    /// Removes the registered waker if there is one, returning `true` in this case.
-    ///
-    /// It allows avoiding spurious wakeups when a waker has been registered,
-    /// but the wake condition is already met.
-    ///
-    /// # Safety
-    ///
-    /// All waker registration methods must not be called concurrently with each other from
-    /// multiple threads.
-    #[inline]
-    pub unsafe fn unregister(&self) -> bool {
-        #[cfg(all(debug_assertions, not(loom)))]
-        let _guard = self.exclusive.check();
-        self.unregister_vtable()
-            .is_some_and(|vtable| self.unregister_inlined(vtable))
-    }
-
-    fn unregister_vtable(&self) -> Option<*mut RawWakerVTable> {
-        let vtable = self.vtable.load(Relaxed);
-        (vtable.has(REGISTERED) && !vtable.has(WAKING) && !is_fallback(vtable)).then_some(vtable)
-    }
-
-    #[inline(always)]
-    fn unregister_inlined(&self, vtable: *mut RawWakerVTable) -> bool {
-        debug_assert!(vtable.has(REGISTERED) && !vtable.has(WAKING) && !is_fallback(vtable));
-        let unregistered = vtable.unset(REGISTERED);
-        // Relaxed/Acquire order is ok here, as `unregister` and `register` are called in
-        // the same thread, i.e. sequenced-before, so there is no risk that this CAS make
-        // possible a stale load of an unregistered vtable instead of a registered one.
-        // It may provoke a stale load of registered vtable, but `wake` deals with it.
-        // As `wake_fallback` may modify waker data, CACHED=false requires Acquire
-        // ordering to drop the waker
-        let ordering = if CACHED { Relaxed } else { Acquire };
-        // TRANSITION: V|R -> V
-        match (self.vtable).compare_exchange(vtable, unregistered, ordering, Relaxed) {
-            Ok(_) if !CACHED => {
-                // SAFETY: No concurrent `register` can happen, and there is no fallback waker
-                // registered, so `wake` can't modify data
-                drop(unsafe { self.waker(unregistered) });
-                true
-            }
-            res => res.is_ok(),
-        }
-    }
-
-    /// Returns `true` if a waker is currently registered.
-    ///
-    /// This provides a best-effort snapshot: a concurrent [`wake`] call may
-    /// consume the waker right after this returns `true`, and a concurrent
-    /// [`register`] call may store one right after this returns `false`.
-    ///
-    /// Calling `has_waker_registered` then `wake` if it is returned `true`
-    /// is guaranteed to provide the same synchronization as calling `wake`
-    /// alone.
-    ///
-    /// [`register`]: Self::register
-    /// [`wake`]: Self::wake
-    #[inline]
-    pub fn has_waker_registered(&self) -> bool {
-        self.has_waker_registered_impl().is_some()
-    }
-
-    #[inline(always)]
-    fn has_waker_registered_impl(&self) -> Option<(*mut RawWakerVTable, bool)> {
-        let mut released = false;
-        let vtable = match S::MODE {
-            // SYNC=true requires a Release write on the state, but we don't want to set
-            // the WAKING bit if there is no waker, as it would require unsetting it.
-            // So we attempt a `fetch_add(0)` and hope for no concurrent `register`.
-            // The next `register` synchronizes with this Release write even if other
-            // RMWs intervene, through the release sequence it heads.
-            SyncMode::Synchronized => {
-                let mut vtable = self.vtable.load(Relaxed);
-                if !vtable.has(REGISTERED) {
-                    vtable = self.vtable.fetch_byte_add(0, Release);
-                    released = true;
-                }
-                vtable
-            }
-            // Loading the vtable with SeqCst is necessary for the pattern
-            // `store X; load Y || store Y; load X` to not miss any
-            // notification, where X is the wake condition and Y the vtable.
-            SyncMode::Sequential => self.vtable.load(SeqCst),
-            // Synchronization should be handled by the user in such a way that
-            // Relaxed ordering can be used.
-            SyncMode::Unsynchronized => self.vtable.load(Relaxed),
-        };
-        vtable.has(REGISTERED).then_some((vtable, released))
-    }
-
-    /// Consumes the last `Waker` registered and wakes its task.
-    #[inline]
-    pub fn wake(&self) {
-        self.check_registered_and_wake(false, Waker::wake);
-    }
-
-    /// Same as [`wake`](Self::wake), but with the waking path marked `#[cold]`.
-    ///
-    /// This allows the method to inline more effectively. Prefer this over
-    /// `wake` when waking is the uncommon case.
-    #[inline]
-    pub fn wake_cold(&self) {
-        self.check_registered_and_wake(true, Waker::wake);
-    }
-
-    #[inline(always)]
-    fn check_registered_and_wake<R>(&self, cold: bool, wake: impl FnOnce(Waker) -> R) -> Option<R> {
-        let (vtable, released) = self.has_waker_registered_impl()?;
-        if cold {
-            self.wake_registered_cold(vtable, released, wake)
-        } else {
-            self.wake_registered(vtable, released, wake)
-        }
-    }
-
-    #[cfg(not(miri))]
-    const RELEASE: Ordering = Release;
-    #[cfg(miri)] // See https://github.com/rust-lang/miri/issues/5104
-    const RELEASE: Ordering = if S::SYNC { Release } else { SeqCst }; // !ORDERING
-
-    #[inline(always)]
-    fn wake_registered<R>(
-        &self,
-        mut vtable: *mut RawWakerVTable,
-        mut released: bool,
-        wake: impl FnOnce(Waker) -> R,
-    ) -> Option<R> {
-        // A waker is registered, try setting the WAKING flag.
-        loop {
-            if !vtable.has(WAKING) {
-                // Acquire ordering is necessary to synchronize data access.
-                // SYNC=true also needs Release to synchronize with `wake`.
-                // It could be tempting to defer the Release to the last CAS,
-                // but it doesn't work when a fallback waker is registered.
-                // In fact, `wake` would happen before the registration, but
-                // without synchronizing the wake condition.
-                let ordering = if S::SYNC { AcqRel } else { Acquire };
-                // TRANSITION: V|R -> V|R|W / N|R -> N|R|W / RF|R -> RF|R|W
-                match (self.vtable).compare_exchange(vtable, vtable.set(WAKING), ordering, Relaxed)
-                {
-                    Ok(_) => break,
-                    // Waking thread can update the vtable without consuming the waker
-                    // when a fallback waker is registered, so the operation should be retried.
-                    Err(v) if is_fallback(vtable) && v.has(REGISTERED) => {
-                        vtable = v;
-                        continue;
-                    }
-                    Err(_) => {}
-                };
-            }
-            // Do the Release RMW if not done yet for SYNC=true and retry.
-            if S::SYNC && !released {
-                vtable = self.vtable.fetch_byte_add(0, Release);
-                released = true;
-                if vtable.has(REGISTERED) {
-                    continue;
-                }
-            }
-            // Setting the flag fails because the waker has already been consumed.
-            // There is no interest in retrying, as the wake condition should already
-            // have been met, so it will be checked successfully after registering the
-            // next waker.
-            return None;
-        }
-        // The fallback waker has been notified for the waking thread to call it, return.
-        if is_fallback(vtable) {
-            return None;
-        }
-        // SAFETY: it has been tested before, but this assert helps compiler
-        unsafe { assert_unchecked(vtable.has(REGISTERED)) };
-        let unregistered = vtable.unset(REGISTERED);
-        // SAFETY: The vtable WAKING flag has been set, so no waker can be registered.
-        let waker = unsafe { self.waker(unregistered) };
-        // With CACHED=true, as `wake_by_ref` uses a reference, the waker must remain
-        // valid so it must be executed before resetting the state.
-        let waker = ManuallyDrop::new(waker);
-        if CACHED {
-            handle_panic(
-                || waker.wake_by_ref(),
-                // If a new waker is registered in fallback, it will be leaked.
-                // Leaking is better than risking an abort because of double panic.
-                || self.vtable.swap(unregistered, SeqCst), // !ORDERING
-            );
-        }
-        // Try resetting the vtable to unregistered. Use release ordering to
-        // synchronize data access. Not using SeqCst with SYNC=false doesn't
-        // break the lost-wakeup guarantee. Imagine the deadlock scenario:
-        // the registering thread checks the wakeup condition after registration
-        // and finds it unset, while this stale store is loaded by a `wake`
-        // called after the condition was set. The unset condition load is
-        // coherence-ordered before the condition store (it reads a value the
-        // store overwrites), so with thread sequencing, the registration precedes
-        // the stale vtable load in the SeqCst total order. But loading a vtable
-        // older in modification order than the registration would coherence-order
-        // the load *before* the registration — contradiction
-        // TRANSITION: V|R|W -> V
-        match (self.vtable).compare_exchange(
-            vtable.set(WAKING),
-            unregistered,
-            Self::RELEASE,
-            Relaxed,
-        ) {
-            Ok(_) if CACHED => None,
-            Ok(_) => Some(wake(ManuallyDrop::into_inner(waker))),
-            // Failing to reset the state means a concurrent `register` forced
-            // a fallback waker registration.
-            Err(vtable) => self.wake_fallback(vtable, unregistered, waker, wake),
-        }
-    }
-
-    #[cold]
-    fn wake_fallback<R>(
-        &self,
-        mut vtable: *mut RawWakerVTable,
-        unregistered: *mut RawWakerVTable,
-        waker: ManuallyDrop<Waker>,
-        wake: impl FnOnce(Waker) -> R,
-    ) -> Option<R> {
-        // A fallback waker has been registered, and may be registered again or woken concurrently.
-        loop {
-            // `register` tries acquiring the fallback waker to overwrite it.
-            // We don't have to wait for it to complete and can just reset the vtable,
-            // as `register` will handle it and store a new waker normally.
-            if vtable == NULL {
-                // TRANSITION: N -> V
-                if let Err(v) =
-                    (self.vtable).compare_exchange(vtable, unregistered, Self::RELEASE, Relaxed)
-                {
-                    vtable = v;
-                    continue;
-                }
-                // There is no point to wake the initial waker as register has been called
-                // since; just drop it.
-                if !CACHED {
-                    drop(ManuallyDrop::into_inner(waker));
-                }
-                return None;
-            // A fallback waker has been registered, it should replace the main waker.
-            } else if vtable == NULL.set(REGISTERED) {
-                let read_fallback = READ_FALLBACK.set(REGISTERED);
-                // First update the vtable to read the fallback waker
-                // TRANSITION: N|R -> RF|R
-                if let Err(v) =
-                    (self.vtable).compare_exchange(vtable, read_fallback, Acquire, Relaxed)
-                {
-                    vtable = v;
-                    continue;
-                }
-                // Try replacing the main waker by the fallback one.
-                // SAFETY: Waker data is no longer accessed by registering thread after WAKING
-                // flag has been set
-                #[allow(unstable_name_collisions)]
-                let data = unsafe { self.data.replace(self.fallback_data.load(Relaxed)) };
-                let registered = self.fallback_vtable.load(Relaxed).set(REGISTERED);
-                // TRANSITION: RF|R -> V|R
-                if let Err(v) =
-                    (self.vtable).compare_exchange(read_fallback, registered, Release, Relaxed)
-                {
-                    vtable = v;
-                    // Don't forget to restore the initial data if replacement fails.
-                    // SAFETY: Waker data is no longer accessed by registering thread after WAKING
-                    // flag has been set
-                    unsafe { self.data.write(data) };
-                    continue;
-                }
-                drop(ManuallyDrop::into_inner(waker));
-                return None;
-            // A registered fallback waker has been notified by another thread.
-            } else {
-                debug_assert!(vtable.has(REGISTERED) && vtable.has(WAKING));
-                let read_fallback = READ_FALLBACK.set(REGISTERED | WAKING);
-                // The vtable must be updated before reading the fallback waker.
-                if vtable != read_fallback
-                    // TRANSITION: N|R|W -> RF|R|W
-                    && let Err(v) =
-                    (self.vtable).compare_exchange(vtable, read_fallback, Acquire, Relaxed)
-                {
-                    vtable = v;
-                    continue;
-                }
-                // SAFETY: fallback waker is used after resetting the vtable to unregistered
-                // so they can't have been concurrent modification of fallback waker as
-                // register would first try to reset the vtable to NULL.
-                let fallback_waker = ManuallyDrop::new(unsafe { self.fallback_waker() });
-                // Now reset the vtable to unregistered to wake the fallback waker.
-                // TRANSITION: RF|R|W -> V
-                if let Err(v) = (self.vtable).compare_exchange(
-                    read_fallback,
-                    unregistered,
-                    Self::RELEASE,
-                    Relaxed,
-                ) {
-                    vtable = v;
-                    continue;
-                }
-                let res = Some(wake(ManuallyDrop::into_inner(fallback_waker)));
-                if !CACHED {
-                    drop(ManuallyDrop::into_inner(waker));
-                }
-                return res;
-            }
-        }
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn wake_registered_cold<R>(
-        &self,
-        vtable: *mut RawWakerVTable,
-        released: bool,
-        wake: impl FnOnce(Waker) -> R,
-    ) -> Option<R> {
-        self.wake_registered(vtable, released, wake)
-    }
-}
-impl<S: Synchronization> SpmcWaker<S, false> {
-    /// Consumes the last `Waker` registered and returns it.
-    #[inline]
-    pub fn take(&self) -> Option<Waker> {
-        self.check_registered_and_wake(false, identity)
-    }
-
-    /// Same as [`take`](Self::take), but with the taking path marked `#[cold]`.
-    ///
-    /// This allows the method to inline more effectively. Prefer this over
-    /// `take` when taking is the uncommon case.
-    #[inline]
-    pub fn take_cold(&self) -> Option<Waker> {
-        self.check_registered_and_wake(true, identity)
+    pub unsafe fn register(&self, waker: &Waker) -> RegisteredWaker<'_, S, CACHING, Unchecked> {
+        RegisteredWaker::new(self, self.register_impl(waker), false)
     }
 }
 
-impl<S: Synchronization, const CACHED: bool> Default for SpmcWaker<S, CACHED> {
+impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> Default
+    for SpmcWaker<S, CACHING, R>
+{
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// Future returned by [`SpmcWaker::wait_until`]
-pub struct WaitUntil<'a, F, S: Synchronization, const CACHED: bool> {
-    wake: &'a SpmcWaker<S, CACHED>,
-    wake_condition: F,
+/// Token returned by [`SpmcWaker::register`] to unregister the waker if the wake condition is met.
+pub struct RegisteredWaker<
+    'a,
+    S: Synchronization = Synchronized,
+    const CACHING: bool = false,
+    R: RegistrationPolicy = Strict,
+> {
+    spmc_waker: &'a SpmcWaker<S, CACHING, R>,
+    state: State,
+    released: S::Released,
 }
 
-impl<F, S: Synchronization, const CACHED: bool> Unpin for WaitUntil<'_, F, S, CACHED> {}
-
-impl<F: FnMut(bool) -> W, W: WakeCondition, S: Synchronization, const CACHED: bool> Future
-    for WaitUntil<'_, F, S, CACHED>
+impl<'a, S: Synchronization, const CACHING: bool, R: RegistrationPolicy>
+    RegisteredWaker<'a, S, CACHING, R>
 {
-    type Output = W::Output;
-    #[inline(always)]
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // SAFETY: as per `SpmcWaker::wait_until` safety contract
-        unsafe {
-            self.wake
-                .poll_wait_until(cx, |registered| (self.wake_condition)(registered))
+    fn new(
+        spmc_waker: &'a SpmcWaker<S, CACHING, R>,
+        state: State,
+        released: impl Into<S::Released>,
+    ) -> Self {
+        debug_assert!(state.has(REGISTERED));
+        Self {
+            spmc_waker,
+            state,
+            released: released.into(),
         }
     }
-}
 
-/// Wake condition returned by closure passed in [`SpmcWaker::wait_until`].
-///
-/// Typically implemented by `bool` and `Option<T>`. When met, it provides
-/// an output that can be returned by `wait_until`.
-pub trait WakeCondition {
-    /// Wake condition output when met.
-    type Output;
-    /// Try getting the wake condition output, thereby checking if it is met.
-    fn try_into_output(self) -> Option<Self::Output>;
-}
-
-impl WakeCondition for bool {
-    type Output = ();
-    fn try_into_output(self) -> Option<Self::Output> {
-        self.then_some(())
+    /// Unregisters the previously registered waker.
+    ///
+    /// It allows avoiding spurious wakeups if the wake condition is already met.
+    pub fn unregister(self) {
+        self.spmc_waker.unregister_impl(self.state);
     }
-}
 
-impl<T> WakeCondition for Option<T> {
-    type Output = T;
-    fn try_into_output(self) -> Option<Self::Output> {
-        self
+    /// Consumes the `Waker` and wakes its task.
+    pub fn wake(self) {
+        self.spmc_waker.wake_impl(self.state, self.released);
+    }
+
+    /// Consumes the `Waker` and returns it.
+    pub fn take(self) -> Option<Waker> {
+        let (waker, _) = self.spmc_waker.take_impl(self.state, self.released)?;
+        #[cfg(any(loom, miri))]
+        let waker = waker.get();
+        Some(waker)
     }
 }

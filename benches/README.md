@@ -1,6 +1,6 @@
 # Benchmark
 
-This benchmark compares `SpmcWaker<S, CACHED>` with `futures::task::AtomicWaker`; [`diatomic_waker::DiatomicWaker`](https://docs.rs/diatomic-waker/latest/diatomic_waker/struct.DiatomicWaker.html) is also included for completeness.
+This benchmark compares `SpmcWaker<S, CACHING, R>` with `futures::task::AtomicWaker`; [`diatomic_waker::DiatomicWaker`](https://docs.rs/diatomic-waker/latest/diatomic_waker/struct.DiatomicWaker.html) is also included for completeness.
 As expected, `SpmcWaker` is significantly faster than the alternatives in any meaningful scenario.
 
 The following scenarios are measured:
@@ -13,174 +13,147 @@ The following scenarios are measured:
 
 The most important gain is on `wake_cold_empty` with `S=Sequential` and `S=Unsynchronized`, which is not surprising as it compiles to a single atomic load. However, `wake_cold` is also read-only (but still pays a fence) with default `S=Synchronized` on x86, which is why the benchmark shows no contention impact.
 
-Another visible result is the performance gain with `CACHED=true`. In fact, it saves most atomic RMW operations updating the waker's reference count (except in overwrite). `DiatomicWaker` also uses caching, which explains its better numbers than `AtomicWaker`.
+Another visible result is the performance gain with `CACHING=true`. In fact, it saves most atomic RMW operations updating the waker's reference count (except in overwrite). `DiatomicWaker` also uses caching, which explains its better numbers than `AtomicWaker`.
 
 ## Results
 
-### x86_64 (Intel(R) Xeon(R) CPU E3-1275 v5)
+### x86_64 (Intel Core i7-1065G7)
 
 ```
-Timer precision: 16 ns
-comparison                                                fastest       │ slowest       │ median        │ mean          │ samples │ iters
-├─ register                                                             │               │               │               │         │
-│  ├─ AtomicWaker                                         18.31 ns      │ 18.92 ns      │ 18.38 ns      │ 18.39 ns      │ 100     │ 12800
-│  ├─ DiatomicWaker                                       6.944 ns      │ 84.99 ns      │ 7.001 ns      │ 8.037 ns      │ 100     │ 25600
-│  ├─ SpmcWaker                                           4.78 ns       │ 4.845 ns      │ 4.794 ns      │ 4.795 ns      │ 100     │ 51200
-│  ├─ SpmcWaker<spmc_waker::sync::Sequential, false>      9.995 ns      │ 10.08 ns      │ 10.02 ns      │ 10.02 ns      │ 100     │ 25600
-│  ├─ SpmcWaker<spmc_waker::sync::Sequential>             4.778 ns      │ 15.1 ns       │ 4.793 ns      │ 4.899 ns      │ 100     │ 51200
-│  ├─ SpmcWaker<spmc_waker::sync::Synchronized, false>    9.995 ns      │ 61.25 ns      │ 10.02 ns      │ 10.9 ns       │ 100     │ 25600
-│  ├─ SpmcWaker<spmc_waker::sync::Unsynchronized, false>  6.382 ns      │ 6.433 ns      │ 6.4 ns        │ 6.401 ns      │ 100     │ 25600
-│  ╰─ SpmcWaker<spmc_waker::sync::Unsynchronized>         0.735 ns      │ 0.806 ns      │ 0.767 ns      │ 0.765 ns      │ 100     │ 204800
-├─ register_already_registered                                          │               │               │               │         │
-│  ├─ AtomicWaker                                         13.1 ns       │ 119.7 ns      │ 13.15 ns      │ 14.24 ns      │ 100     │ 12800
-│  ├─ DiatomicWaker                                       6.757 ns      │ 7.038 ns      │ 6.8 ns        │ 6.804 ns      │ 100     │ 25600
-│  ├─ SpmcWaker                                           1.606 ns      │ 1.715 ns      │ 1.641 ns      │ 1.641 ns      │ 100     │ 102400
-│  ├─ SpmcWaker<spmc_waker::sync::Sequential, false>      1.465 ns      │ 16.09 ns      │ 1.499 ns      │ 1.663 ns      │ 100     │ 102400
-│  ├─ SpmcWaker<spmc_waker::sync::Sequential>             1.599 ns      │ 17.78 ns      │ 1.631 ns      │ 1.791 ns      │ 100     │ 102400
-│  ├─ SpmcWaker<spmc_waker::sync::Synchronized, false>    1.46 ns       │ 15.83 ns      │ 1.486 ns      │ 1.63 ns       │ 100     │ 102400
-│  ├─ SpmcWaker<spmc_waker::sync::Unsynchronized, false>  1.554 ns      │ 14.2 ns       │ 1.576 ns      │ 1.7 ns        │ 100     │ 102400
-│  ╰─ SpmcWaker<spmc_waker::sync::Unsynchronized>         1.6 ns        │ 4.754 ns      │ 1.645 ns      │ 1.675 ns      │ 100     │ 102400
-├─ register_overwrite                                                   │               │               │               │         │
-│  ├─ AtomicWaker                                         22.14 ns      │ 122.8 ns      │ 22.31 ns      │ 23.32 ns      │ 100     │ 12800
-│  ├─ DiatomicWaker                                       23.09 ns      │ 141.3 ns      │ 24.06 ns      │ 26.08 ns      │ 100     │ 12800
-│  ├─ SpmcWaker                                           23.27 ns      │ 62.45 ns      │ 23.34 ns      │ 23.99 ns      │ 100     │ 12800
-│  ├─ SpmcWaker<spmc_waker::sync::Sequential, false>      23.03 ns      │ 124.8 ns      │ 23.1 ns       │ 24.52 ns      │ 100     │ 12800
-│  ├─ SpmcWaker<spmc_waker::sync::Sequential>             23.26 ns      │ 139.4 ns      │ 23.34 ns      │ 27.51 ns      │ 100     │ 12800
-│  ├─ SpmcWaker<spmc_waker::sync::Synchronized, false>    23.04 ns      │ 137.7 ns      │ 23.1 ns       │ 24.51 ns      │ 100     │ 12800
-│  ├─ SpmcWaker<spmc_waker::sync::Unsynchronized, false>  17.32 ns      │ 133 ns        │ 17.67 ns      │ 19.21 ns      │ 100     │ 12800
-│  ╰─ SpmcWaker<spmc_waker::sync::Unsynchronized>         17.22 ns      │ 133.4 ns      │ 18.35 ns      │ 19.41 ns      │ 100     │ 12800
-├─ wake                                                                 │               │               │               │         │
-│  ├─ AtomicWaker                                         15.84 ns      │ 130.7 ns      │ 16.08 ns      │ 18.19 ns      │ 100     │ 12800
-│  ├─ DiatomicWaker                                       12.67 ns      │ 112.9 ns      │ 12.74 ns      │ 14.15 ns      │ 100     │ 12800
-│  ├─ SpmcWaker                                           11.84 ns      │ 32.3 ns       │ 12.01 ns      │ 12.3 ns       │ 100     │ 25600
-│  ├─ SpmcWaker<spmc_waker::sync::Sequential, false>      15.23 ns      │ 54.71 ns      │ 15.3 ns       │ 15.7 ns       │ 100     │ 12800
-│  ├─ SpmcWaker<spmc_waker::sync::Sequential>             11.6 ns       │ 69.73 ns      │ 11.7 ns       │ 13.08 ns      │ 100     │ 25600
-│  ├─ SpmcWaker<spmc_waker::sync::Synchronized, false>    15.03 ns      │ 55.01 ns      │ 15.32 ns      │ 15.7 ns       │ 100     │ 12800
-│  ├─ SpmcWaker<spmc_waker::sync::Unsynchronized, false>  15.39 ns      │ 130.6 ns      │ 15.44 ns      │ 17.6 ns       │ 100     │ 12800
-│  ╰─ SpmcWaker<spmc_waker::sync::Unsynchronized>         11.64 ns      │ 39.57 ns      │ 11.7 ns       │ 12.11 ns      │ 100     │ 25600
-├─ wake_cold                                                            │               │               │               │         │
-│  ├─ AtomicWaker                                         15.89 ns      │ 131.5 ns      │ 16.08 ns      │ 18.44 ns      │ 100     │ 12800
-│  ├─ DiatomicWaker                                       12.69 ns      │ 127.1 ns      │ 12.74 ns      │ 13.88 ns      │ 100     │ 12800
-│  ├─ SpmcWaker                                           13.56 ns      │ 70.78 ns      │ 13.9 ns       │ 14.44 ns      │ 100     │ 12800
-│  ├─ SpmcWaker<spmc_waker::sync::Sequential, false>      16.34 ns      │ 208.9 ns      │ 16.59 ns      │ 18.5 ns       │ 100     │ 12800
-│  ├─ SpmcWaker<spmc_waker::sync::Sequential>             13.7 ns       │ 129.5 ns      │ 13.76 ns      │ 15.32 ns      │ 100     │ 12800
-│  ├─ SpmcWaker<spmc_waker::sync::Synchronized, false>    14.83 ns      │ 75.15 ns      │ 15.66 ns      │ 16.22 ns      │ 100     │ 12800
-│  ├─ SpmcWaker<spmc_waker::sync::Unsynchronized, false>  14.77 ns      │ 116 ns        │ 16.52 ns      │ 17.48 ns      │ 100     │ 12800
-│  ╰─ SpmcWaker<spmc_waker::sync::Unsynchronized>         13.73 ns      │ 115.1 ns      │ 13.78 ns      │ 15.3 ns       │ 100     │ 12800
-╰─ wake_cold_empty                                                      │               │               │               │         │
-   ├─ AtomicWaker                                                       │               │               │               │         │
-   │  ├─ t=1                                              14.45 ns      │ 129.8 ns      │ 14.49 ns      │ 17.08 ns      │ 100     │ 12800
-   │  ├─ t=2                                              15.06 ns      │ 119.9 ns      │ 27.3 ns       │ 27.77 ns      │ 100     │ 12800
-   │  ╰─ t=4                                              18.6 ns       │ 188.4 ns      │ 108.7 ns      │ 97.49 ns      │ 100     │ 1600
-   ├─ DiatomicWaker                                                     │               │               │               │         │
-   │  ├─ t=1                                              8.55 ns       │ 58 ns         │ 8.825 ns      │ 9.476 ns      │ 100     │ 25600
-   │  ├─ t=2                                              12.33 ns      │ 54.13 ns      │ 19.83 ns      │ 19.94 ns      │ 100     │ 25600
-   │  ╰─ t=4                                              20.48 ns      │ 3.205 µs      │ 31.1 ns       │ 68.29 ns      │ 100     │ 400
-   ├─ SpmcWaker                                                         │               │               │               │         │
-   │  ├─ t=1                                              6.206 ns      │ 58.05 ns      │ 6.398 ns      │ 7.433 ns      │ 100     │ 25600
-   │  ├─ t=2                                              6.39 ns       │ 6.737 ns      │ 6.484 ns      │ 6.481 ns      │ 100     │ 25600
-   │  ╰─ t=4                                              5.413 ns      │ 57.55 ns      │ 6.415 ns      │ 6.719 ns      │ 100     │ 25600
-   ├─ SpmcWaker<spmc_waker::sync::Sequential, false>                    │               │               │               │         │
-   │  ├─ t=1                                              0.524 ns      │ 6.707 ns      │ 0.527 ns      │ 0.6 ns        │ 100     │ 204800
-   │  ├─ t=2                                              0.513 ns      │ 9.004 ns      │ 0.523 ns      │ 0.622 ns      │ 100     │ 204800
-   │  ╰─ t=4                                              0.536 ns      │ 7.809 ns      │ 0.9 ns        │ 0.982 ns      │ 100     │ 204800
-   ├─ SpmcWaker<spmc_waker::sync::Sequential>                           │               │               │               │         │
-   │  ├─ t=1                                              0.513 ns      │ 0.573 ns      │ 0.527 ns      │ 0.533 ns      │ 100     │ 204800
-   │  ├─ t=2                                              0.515 ns      │ 7.778 ns      │ 0.519 ns      │ 0.595 ns      │ 100     │ 204800
-   │  ╰─ t=4                                              0.548 ns      │ 13.32 ns      │ 0.914 ns      │ 1.043 ns      │ 100     │ 102400
-   ├─ SpmcWaker<spmc_waker::sync::Synchronized, false>                  │               │               │               │         │
-   │  ├─ t=1                                              6.23 ns       │ 64.65 ns      │ 6.417 ns      │ 8.316 ns      │ 100     │ 25600
-   │  ├─ t=2                                              6.198 ns      │ 6.562 ns      │ 6.314 ns      │ 6.315 ns      │ 100     │ 25600
-   │  ╰─ t=4                                              6.39 ns       │ 9.132 ns      │ 7.025 ns      │ 7.407 ns      │ 100     │ 25600
-   ├─ SpmcWaker<spmc_waker::sync::Unsynchronized, false>                │               │               │               │         │
-   │  ├─ t=1                                              0.512 ns      │ 0.756 ns      │ 0.515 ns      │ 0.533 ns      │ 100     │ 204800
-   │  ├─ t=2                                              0.511 ns      │ 4.736 ns      │ 0.517 ns      │ 0.56 ns       │ 100     │ 409600
-   │  ╰─ t=4                                              0.534 ns      │ 1.36 ns       │ 0.869 ns      │ 0.907 ns      │ 100     │ 204800
-   ╰─ SpmcWaker<spmc_waker::sync::Unsynchronized>                       │               │               │               │         │
-      ├─ t=1                                              0.525 ns      │ 3.475 ns      │ 0.527 ns      │ 0.565 ns      │ 100     │ 204800
-      ├─ t=2                                              0.514 ns      │ 0.545 ns      │ 0.525 ns      │ 0.525 ns      │ 100     │ 204800
-      ╰─ t=4                                              0.534 ns      │ 1.359 ns      │ 0.847 ns      │ 0.903 ns      │ 100     │ 204800
-```
+Timer precision: 100 ns
+comparison                                                                                                fastest       │ slowest       │ median        │ mean          │ samples │ iters
+├─ register                                                                                                             │               │               │               │         │
+│  ├─ AtomicWaker                                                                                         16.3 ns       │ 310.8 ns      │ 18.25 ns      │ 18.97 ns      │ 2553    │ 1307136
+│  ├─ DiatomicWaker                                                                                       5.95 ns       │ 53.94 ns      │ 6.78 ns       │ 7.293 ns      │ 838     │ 1716224
+│  ├─ SpmcWaker                                                                                           17.08 ns      │ 696.6 ns      │ 17.47 ns      │ 18.92 ns      │ 1455    │ 1489920
+│  ├─ SpmcWaker<spmc_waker::synchronization::Sequential, false, spmc_waker::registration::Unchecked>      10.14 ns      │ 64.05 ns      │ 11.32 ns      │ 11.45 ns      │ 1809    │ 1852416
+│  ├─ SpmcWaker<spmc_waker::synchronization::Sequential, true, spmc_waker::registration::Unchecked>       4.387 ns      │ 46.57 ns      │ 4.485 ns      │ 4.826 ns      │ 1912    │ 1957888
+│  ├─ SpmcWaker<spmc_waker::synchronization::Sequential, true>                                            10.05 ns      │ 228.2 ns      │ 10.44 ns      │ 12.28 ns      │ 3005    │ 1538560
+│  ├─ SpmcWaker<spmc_waker::synchronization::Sequential>                                                  15.71 ns      │ 118 ns        │ 16.1 ns       │ 17.93 ns      │ 3138    │ 1606656
+│  ├─ SpmcWaker<spmc_waker::synchronization::Synchronized, false, spmc_waker::registration::Unchecked>    10.14 ns      │ 112.3 ns      │ 10.24 ns      │ 11.55 ns      │ 1862    │ 1906688
+│  ├─ SpmcWaker<spmc_waker::synchronization::Synchronized, true, spmc_waker::registration::Unchecked>     4.411 ns      │ 23.5 ns       │ 4.558 ns      │ 5.314 ns      │ 469     │ 1921024
+│  ├─ SpmcWaker<spmc_waker::synchronization::Synchronized, true>                                          9.953 ns      │ 89.64 ns      │ 10.24 ns      │ 11.17 ns      │ 1556    │ 1593344
+│  ├─ SpmcWaker<spmc_waker::synchronization::Unsynchronized, false, spmc_waker::registration::Unchecked>  6.633 ns      │ 49.21 ns      │ 8.293 ns      │ 9.622 ns      │ 950     │ 1945600
+│  ├─ SpmcWaker<spmc_waker::synchronization::Unsynchronized, true, spmc_waker::registration::Unchecked>   0.823 ns      │ 5.986 ns      │ 1.128 ns      │ 1.366 ns      │ 240     │ 1966080
+│  ├─ SpmcWaker<spmc_waker::synchronization::Unsynchronized, true>                                        7.073 ns      │ 27.72 ns      │ 7.17 ns       │ 8.111 ns      │ 949     │ 1943552
+│  ╰─ SpmcWaker<spmc_waker::synchronization::Unsynchronized>                                              10.83 ns      │ 103.4 ns      │ 10.93 ns      │ 12.4 ns       │ 2101    │ 2151424
+├─ register_already_registered                                                                                          │               │               │               │         │
+│  ├─ AtomicWaker                                                                                         11.12 ns      │ 112.2 ns      │ 12.49 ns      │ 13.5 ns       │ 2062    │ 2111488
+│  ├─ DiatomicWaker                                                                                       6.145 ns      │ 28.55 ns      │ 6.194 ns      │ 6.969 ns      │ 1355    │ 2775040
+│  ├─ SpmcWaker                                                                                           12.1 ns       │ 96.57 ns      │ 12.29 ns      │ 13.72 ns      │ 2105    │ 2155520
+│  ├─ SpmcWaker<spmc_waker::synchronization::Sequential, false, spmc_waker::registration::Unchecked>      1.897 ns      │ 26.79 ns      │ 2.092 ns      │ 2.435 ns      │ 1650    │ 3379200
+│  ├─ SpmcWaker<spmc_waker::synchronization::Sequential, true, spmc_waker::registration::Unchecked>       1.848 ns      │ 21.52 ns      │ 2.019 ns      │ 2.308 ns      │ 819     │ 3354624
+│  ├─ SpmcWaker<spmc_waker::synchronization::Sequential, true>                                            12.1 ns       │ 86.71 ns      │ 12.49 ns      │ 13.64 ns      │ 2062    │ 2111488
+│  ├─ SpmcWaker<spmc_waker::synchronization::Sequential>                                                  12.1 ns       │ 103.8 ns      │ 12.2 ns       │ 13.34 ns      │ 2134    │ 2185216
+│  ├─ SpmcWaker<spmc_waker::synchronization::Synchronized, false, spmc_waker::registration::Unchecked>    1.885 ns      │ 13.7 ns       │ 2.214 ns      │ 2.636 ns      │ 411     │ 3366912
+│  ├─ SpmcWaker<spmc_waker::synchronization::Synchronized, true, spmc_waker::registration::Unchecked>     1.848 ns      │ 20.03 ns      │ 2.019 ns      │ 2.452 ns      │ 781     │ 3198976
+│  ├─ SpmcWaker<spmc_waker::synchronization::Synchronized, true>                                          12.1 ns       │ 77.53 ns      │ 12.59 ns      │ 14.09 ns      │ 2007    │ 2055168
+│  ├─ SpmcWaker<spmc_waker::synchronization::Unsynchronized, false, spmc_waker::registration::Unchecked>  1.872 ns      │ 12.37 ns      │ 1.897 ns      │ 2.224 ns      │ 1039    │ 4255744
+│  ├─ SpmcWaker<spmc_waker::synchronization::Unsynchronized, true, spmc_waker::registration::Unchecked>   1.762 ns      │ 11.98 ns      │ 1.824 ns      │ 2.219 ns      │ 411     │ 3366912
+│  ├─ SpmcWaker<spmc_waker::synchronization::Unsynchronized, true>                                        6.145 ns      │ 47.01 ns      │ 6.291 ns      │ 7.716 ns      │ 1265    │ 2590720
+│  ╰─ SpmcWaker<spmc_waker::synchronization::Unsynchronized>                                              6.194 ns      │ 51.84 ns      │ 6.389 ns      │ 7.249 ns      │ 1357    │ 2779136
+├─ register_overwrite                                                                                                   │               │               │               │         │
+│  ├─ AtomicWaker                                                                                         22.16 ns      │ 212.3 ns      │ 22.94 ns      │ 25.54 ns      │ 3373    │ 1726976
+│  ├─ DiatomicWaker                                                                                       21.77 ns      │ 179.7 ns      │ 22.16 ns      │ 24.37 ns      │ 3606    │ 1846272
+│  ├─ SpmcWaker                                                                                           22.16 ns      │ 270.5 ns      │ 22.55 ns      │ 25.14 ns      │ 3368    │ 1724416
+│  ├─ SpmcWaker<spmc_waker::synchronization::Sequential, false, spmc_waker::registration::Unchecked>      21.77 ns      │ 145.9 ns      │ 23.72 ns      │ 23.89 ns      │ 3806    │ 1948672
+│  ├─ SpmcWaker<spmc_waker::synchronization::Sequential, true, spmc_waker::registration::Unchecked>       21.96 ns      │ 213.9 ns      │ 22.16 ns      │ 26.28 ns      │ 3483    │ 1783296
+│  ├─ SpmcWaker<spmc_waker::synchronization::Sequential, true>                                            21.57 ns      │ 342.4 ns      │ 24.3 ns       │ 24.88 ns      │ 3324    │ 1701888
+│  ├─ SpmcWaker<spmc_waker::synchronization::Sequential>                                                  22.74 ns      │ 202 ns        │ 23.13 ns      │ 26.49 ns      │ 3212    │ 1644544
+│  ├─ SpmcWaker<spmc_waker::synchronization::Synchronized, false, spmc_waker::registration::Unchecked>    21.77 ns      │ 148.5 ns      │ 23.72 ns      │ 24.55 ns      │ 3737    │ 1913344
+│  ├─ SpmcWaker<spmc_waker::synchronization::Synchronized, true, spmc_waker::registration::Unchecked>     21.96 ns      │ 181.1 ns      │ 23.91 ns      │ 24.76 ns      │ 3694    │ 1891328
+│  ├─ SpmcWaker<spmc_waker::synchronization::Synchronized, true>                                          21.37 ns      │ 238.5 ns      │ 21.96 ns      │ 24.24 ns      │ 3360    │ 1720320
+│  ├─ SpmcWaker<spmc_waker::synchronization::Unsynchronized, false, spmc_waker::registration::Unchecked>  16.69 ns      │ 111.2 ns      │ 17.18 ns      │ 19.96 ns      │ 2323    │ 2378752
+│  ├─ SpmcWaker<spmc_waker::synchronization::Unsynchronized, true, spmc_waker::registration::Unchecked>   16.49 ns      │ 99.3 ns       │ 17.08 ns      │ 19.55 ns      │ 2014    │ 2062336
+│  ├─ SpmcWaker<spmc_waker::synchronization::Unsynchronized, true>                                        16.88 ns      │ 229.1 ns      │ 19.03 ns      │ 19.7 ns       │ 3974    │ 2034688
+│  ╰─ SpmcWaker<spmc_waker::synchronization::Unsynchronized>                                              17.57 ns      │ 109.5 ns      │ 18.35 ns      │ 20.47 ns      │ 2006    │ 2054144
+├─ wake                                                                                                                 │               │               │               │         │
+│  ├─ AtomicWaker                                                                                         16.78 ns      │ 93.93 ns      │ 17.27 ns      │ 19.38 ns      │ 2115    │ 2165760
+│  ├─ DiatomicWaker                                                                                       11.32 ns      │ 84.75 ns      │ 12.78 ns      │ 12.91 ns      │ 2300    │ 2355200
+│  ├─ SpmcWaker                                                                                           10.05 ns      │ 122.5 ns      │ 10.14 ns      │ 11.01 ns      │ 2735    │ 2800640
+│  ├─ SpmcWaker<spmc_waker::synchronization::Sequential, false, spmc_waker::registration::Unchecked>      10.05 ns      │ 147.9 ns      │ 10.05 ns      │ 11.28 ns      │ 3238    │ 3315712
+│  ├─ SpmcWaker<spmc_waker::synchronization::Sequential, true, spmc_waker::registration::Unchecked>       10.34 ns      │ 83.87 ns      │ 10.63 ns      │ 11.67 ns      │ 2551    │ 2612224
+│  ├─ SpmcWaker<spmc_waker::synchronization::Sequential, true>                                            10.53 ns      │ 110.2 ns      │ 10.63 ns      │ 11.99 ns      │ 2113    │ 2163712
+│  ├─ SpmcWaker<spmc_waker::synchronization::Sequential>                                                  10.05 ns      │ 93.05 ns      │ 10.34 ns      │ 11.7 ns       │ 2630    │ 2693120
+│  ├─ SpmcWaker<spmc_waker::synchronization::Synchronized, false, spmc_waker::registration::Unchecked>    10.05 ns      │ 161.2 ns      │ 10.34 ns      │ 11.23 ns      │ 3254    │ 3332096
+│  ├─ SpmcWaker<spmc_waker::synchronization::Synchronized, true, spmc_waker::registration::Unchecked>     10.34 ns      │ 154.8 ns      │ 10.63 ns      │ 11.89 ns      │ 2528    │ 2588672
+│  ├─ SpmcWaker<spmc_waker::synchronization::Synchronized, true>                                          10.44 ns      │ 133 ns        │ 10.93 ns      │ 12.4 ns       │ 2082    │ 2131968
+│  ├─ SpmcWaker<spmc_waker::synchronization::Unsynchronized, false, spmc_waker::registration::Unchecked>  10.05 ns      │ 94.23 ns      │ 10.34 ns      │ 11.67 ns      │ 3743    │ 3832832
+│  ├─ SpmcWaker<spmc_waker::synchronization::Unsynchronized, true, spmc_waker::registration::Unchecked>   10.53 ns      │ 70.98 ns      │ 11.9 ns       │ 12.35 ns      │ 2437    │ 2495488
+│  ├─ SpmcWaker<spmc_waker::synchronization::Unsynchronized, true>                                        10.63 ns      │ 71.86 ns      │ 11.9 ns       │ 13.83 ns      │ 2166    │ 2217984
+│  ╰─ SpmcWaker<spmc_waker::synchronization::Unsynchronized>                                              10.24 ns      │ 163.1 ns      │ 10.34 ns      │ 11.11 ns      │ 3194    │ 3270656
+├─ wake_cold                                                                                                            │               │               │               │         │
+│  ├─ AtomicWaker                                                                                         17.18 ns      │ 54.19 ns      │ 18.84 ns      │ 19.13 ns      │ 2121    │ 2171904
+│  ├─ DiatomicWaker                                                                                       11.32 ns      │ 86.51 ns      │ 12.68 ns      │ 12.91 ns      │ 2298    │ 2353152
+│  ├─ SpmcWaker                                                                                           10.24 ns      │ 83.97 ns      │ 10.53 ns      │ 11.61 ns      │ 2679    │ 2743296
+│  ├─ SpmcWaker<spmc_waker::synchronization::Sequential, false, spmc_waker::registration::Unchecked>      10.05 ns      │ 169.8 ns      │ 10.24 ns      │ 11.74 ns      │ 6201    │ 3174912
+│  ├─ SpmcWaker<spmc_waker::synchronization::Sequential, true, spmc_waker::registration::Unchecked>       11.9 ns       │ 92.86 ns      │ 12.29 ns      │ 13.52 ns      │ 2358    │ 2414592
+│  ├─ SpmcWaker<spmc_waker::synchronization::Sequential, true>                                            11.9 ns       │ 149.9 ns      │ 13.37 ns      │ 14.72 ns      │ 1918    │ 1964032
+│  ├─ SpmcWaker<spmc_waker::synchronization::Sequential>                                                  10.24 ns      │ 68.74 ns      │ 10.34 ns      │ 11.65 ns      │ 2593    │ 2655232
+│  ├─ SpmcWaker<spmc_waker::synchronization::Synchronized, false, spmc_waker::registration::Unchecked>    10.24 ns      │ 85.83 ns      │ 10.63 ns      │ 11.69 ns      │ 3157    │ 3232768
+│  ├─ SpmcWaker<spmc_waker::synchronization::Synchronized, true, spmc_waker::registration::Unchecked>     12.2 ns       │ 71.67 ns      │ 12.59 ns      │ 14.29 ns      │ 2223    │ 2276352
+│  ├─ SpmcWaker<spmc_waker::synchronization::Synchronized, true>                                          12.2 ns       │ 1.549 µs      │ 12.2 ns       │ 14.78 ns      │ 59431   │ 1901792
+│  ├─ SpmcWaker<spmc_waker::synchronization::Unsynchronized, false, spmc_waker::registration::Unchecked>  10.05 ns      │ 292.6 ns      │ 10.05 ns      │ 11.46 ns      │ 7652    │ 3917824
+│  ├─ SpmcWaker<spmc_waker::synchronization::Unsynchronized, true, spmc_waker::registration::Unchecked>   12.2 ns       │ 2.415 µs      │ 12.2 ns       │ 14.63 ns      │ 65586   │ 2098752
+│  ├─ SpmcWaker<spmc_waker::synchronization::Unsynchronized, true>                                        11.9 ns       │ 123.8 ns      │ 12.29 ns      │ 13.24 ns      │ 2349    │ 2405376
+│  ╰─ SpmcWaker<spmc_waker::synchronization::Unsynchronized>                                              10.05 ns      │ 76.26 ns      │ 11.22 ns      │ 11.63 ns      │ 3039    │ 3111936
+╰─ wake_cold_empty                                                                                                      │               │               │               │         │
+   ├─ AtomicWaker                                                                                                       │               │               │               │         │
+   │  ├─ t=1                                                                                              17.66 ns      │ 85.63 ns      │ 17.86 ns      │ 18.39 ns      │ 9793    │ 5014016
+   │  ├─ t=2                                                                                              11.41 ns      │ 529.3 ns      │ 123.1 ns      │ 121.1 ns      │ 11192   │ 1432576
+   │  ╰─ t=4                                                                                              18.45 ns      │ 1.809 µs      │ 205.9 ns      │ 204 ns        │ 20792   │ 1330688
+   ├─ DiatomicWaker                                                                                                     │               │               │               │         │
+   │  ├─ t=1                                                                                              9.66 ns       │ 107.1 ns      │ 10.53 ns      │ 10.48 ns      │ 8374    │ 8574976
+   │  ├─ t=2                                                                                              9.856 ns      │ 466.1 ns      │ 46.96 ns      │ 42.13 ns      │ 15348   │ 3929088
+   │  ╰─ t=4                                                                                              10.63 ns      │ 483.2 ns      │ 96.57 ns      │ 96.73 ns      │ 22440   │ 2872320
+   ├─ SpmcWaker                                                                                                         │               │               │               │         │
+   │  ├─ t=1                                                                                              4.973 ns      │ 65.12 ns      │ 7.121 ns      │ 8.101 ns      │ 5078    │ 10399744
+   │  ├─ t=2                                                                                              5.364 ns      │ 261.6 ns      │ 5.559 ns      │ 6.49 ns       │ 35130   │ 17986560
+   │  ╰─ t=4                                                                                              5.364 ns      │ 81.53 ns      │ 5.461 ns      │ 6.545 ns      │ 30452   │ 31182848
+   ├─ SpmcWaker<spmc_waker::synchronization::Sequential, false, spmc_waker::registration::Unchecked>                    │               │               │               │         │
+   │  ├─ t=1                                                                                              0.328 ns      │ 3.172 ns      │ 0.334 ns      │ 0.354 ns      │ 4359    │ 71417856
+   │  ├─ t=2                                                                                              0.328 ns      │ 2.702 ns      │ 0.34 ns       │ 0.38 ns       │ 7674    │ 125730816
+   │  ╰─ t=4                                                                                              0.334 ns      │ 4.338 ns      │ 1.14 ns       │ 0.922 ns      │ 11624   │ 95223808
+   ├─ SpmcWaker<spmc_waker::synchronization::Sequential, true, spmc_waker::registration::Unchecked>                     │               │               │               │         │
+   │  ├─ t=1                                                                                              0.292 ns      │ 5.834 ns      │ 0.34 ns       │ 0.402 ns      │ 4098    │ 67141632
+   │  ├─ t=2                                                                                              0.292 ns      │ 3.282 ns      │ 0.34 ns       │ 0.388 ns      │ 7348    │ 120389632
+   │  ╰─ t=4                                                                                              0.273 ns      │ 41.44 ns      │ 0.346 ns      │ 0.549 ns      │ 16168   │ 132448256
+   ├─ SpmcWaker<spmc_waker::synchronization::Sequential, true>                                                          │               │               │               │         │
+   │  ├─ t=1                                                                                              0.288 ns      │ 1.799 ns      │ 0.343 ns      │ 0.336 ns      │ 2218    │ 72679424
+   │  ├─ t=2                                                                                              0.243 ns      │ 4.82 ns       │ 0.298 ns      │ 0.369 ns      │ 7678    │ 125796352
+   │  ╰─ t=4                                                                                              0.249 ns      │ 9.807 ns      │ 0.346 ns      │ 0.411 ns      │ 20736   │ 169869312
+   ├─ SpmcWaker<spmc_waker::synchronization::Sequential>                                                                │               │               │               │         │
+   │  ├─ t=1                                                                                              0.279 ns      │ 2.519 ns      │ 0.334 ns      │ 0.347 ns      │ 4403    │ 72138752
+   │  ├─ t=2                                                                                              0.273 ns      │ 5.925 ns      │ 0.292 ns      │ 0.407 ns      │ 7484    │ 122617856
+   │  ╰─ t=4                                                                                              0.322 ns      │ 12.84 ns      │ 0.346 ns      │ 0.428 ns      │ 20092   │ 164593664
+   ├─ SpmcWaker<spmc_waker::synchronization::Synchronized, false, spmc_waker::registration::Unchecked>                  │               │               │               │         │
+   │  ├─ t=1                                                                                              4.826 ns      │ 47.3 ns       │ 5.461 ns      │ 5.75 ns       │ 7106    │ 14553088
+   │  ├─ t=2                                                                                              5.364 ns      │ 51.45 ns      │ 5.461 ns      │ 6.943 ns      │ 20016   │ 20496384
+   │  ╰─ t=4                                                                                              5.364 ns      │ 62.49 ns      │ 5.461 ns      │ 6.031 ns      │ 33168   │ 33964032
+   ├─ SpmcWaker<spmc_waker::synchronization::Synchronized, true, spmc_waker::registration::Unchecked>                   │               │               │               │         │
+   │  ├─ t=1                                                                                              5.412 ns      │ 47.79 ns      │ 5.461 ns      │ 5.731 ns      │ 7111    │ 14563328
+   │  ├─ t=2                                                                                              5.364 ns      │ 122.8 ns      │ 5.559 ns      │ 6.708 ns      │ 19882   │ 20359168
+   │  ╰─ t=4                                                                                              5.364 ns      │ 94.62 ns      │ 5.461 ns      │ 6.087 ns      │ 32652   │ 33435648
+   ├─ SpmcWaker<spmc_waker::synchronization::Synchronized, true>                                                        │               │               │               │         │
+   │  ├─ t=1                                                                                              5.412 ns      │ 54.24 ns      │ 5.461 ns      │ 5.58 ns       │ 7281    │ 14911488
+   │  ├─ t=2                                                                                              5.364 ns      │ 93.45 ns      │ 5.559 ns      │ 7.382 ns      │ 18320   │ 18759680
+   │  ╰─ t=4                                                                                              5.412 ns      │ 54.28 ns      │ 5.461 ns      │ 6.184 ns      │ 18736   │ 38371328
+   ├─ SpmcWaker<spmc_waker::synchronization::Unsynchronized, false, spmc_waker::registration::Unchecked>                │               │               │               │         │
+   │  ├─ t=1                                                                                              0.267 ns      │ 8.244 ns      │ 0.322 ns      │ 0.366 ns      │ 4245    │ 69550080
+   │  ├─ t=2                                                                                              0.237 ns      │ 6.297 ns      │ 0.322 ns      │ 0.338 ns      │ 7982    │ 130777088
+   │  ╰─ t=4                                                                                              0.285 ns      │ 8.659 ns      │ 0.334 ns      │ 0.69 ns       │ 26960   │ 110428160
+   ├─ SpmcWaker<spmc_waker::synchronization::Unsynchronized, true, spmc_waker::registration::Unchecked>                 │               │               │               │         │
+   │  ├─ t=1                                                                                              0.224 ns      │ 5.547 ns      │ 0.322 ns      │ 0.326 ns      │ 4514    │ 73957376
+   │  ├─ t=2                                                                                              0.237 ns      │ 62.21 ns      │ 0.322 ns      │ 0.35 ns       │ 7874    │ 129007616
+   │  ╰─ t=4                                                                                              0.273 ns      │ 211 ns        │ 0.334 ns      │ 0.381 ns      │ 22252   │ 182288384
+   ├─ SpmcWaker<spmc_waker::synchronization::Unsynchronized, true>                                                      │               │               │               │         │
+   │  ├─ t=1                                                                                              0.237 ns      │ 2.19 ns       │ 0.322 ns      │ 0.327 ns      │ 4491    │ 73580544
+   │  ├─ t=2                                                                                              0.231 ns      │ 7.909 ns      │ 0.279 ns      │ 0.346 ns      │ 7892    │ 129302528
+   │  ╰─ t=4                                                                                              0.273 ns      │ 14.72 ns      │ 0.334 ns      │ 0.392 ns      │ 20972   │ 171802624
+   ╰─ SpmcWaker<spmc_waker::synchronization::Unsynchronized>                                                            │               │               │               │         │
+      ├─ t=1                                                                                              0.279 ns      │ 4.149 ns      │ 0.322 ns      │ 0.357 ns      │ 4302    │ 70483968
+      ├─ t=2                                                                                              0.237 ns      │ 6.169 ns      │ 0.322 ns      │ 0.336 ns      │ 15236   │ 124813312
+      ╰─ t=4                                                                                              0.273 ns      │ 12.67 ns      │ 0.334 ns      │ 0.463 ns      │ 18924   │ 155025408
 
-### aarch64 (Apple M3)
 
 ```
-comparison                                                fastest       │ slowest       │ median        │ mean          │ samples │ iters
-├─ register                                                             │               │               │               │         │
-│  ├─ AtomicWaker                                         2.638 ns      │ 2.821 ns      │ 2.679 ns      │ 2.711 ns      │ 100     │ 204800
-│  ├─ DiatomicWaker                                       1 ns          │ 1.356 ns      │ 1.021 ns      │ 1.064 ns      │ 100     │ 409600
-│  ├─ SpmcWaker                                           0.629 ns      │ 1.601 ns      │ 0.65 ns       │ 0.71 ns       │ 100     │ 819200
-│  ├─ SpmcWaker<spmc_waker::sync::Sequential, false>      1.448 ns      │ 2.648 ns      │ 1.499 ns      │ 1.521 ns      │ 100     │ 409600
-│  ├─ SpmcWaker<spmc_waker::sync::Sequential>             0.532 ns      │ 0.792 ns      │ 0.548 ns      │ 0.552 ns      │ 100     │ 819200
-│  ├─ SpmcWaker<spmc_waker::sync::Synchronized, false>    1.458 ns      │ 1.936 ns      │ 1.489 ns      │ 1.513 ns      │ 100     │ 409600
-│  ├─ SpmcWaker<spmc_waker::sync::Unsynchronized, false>  1.438 ns      │ 10.94 ns      │ 1.504 ns      │ 1.765 ns      │ 100     │ 409600
-│  ╰─ SpmcWaker<spmc_waker::sync::Unsynchronized>         0.537 ns      │ 0.695 ns      │ 0.609 ns      │ 0.589 ns      │ 100     │ 819200
-├─ register_already_registered                                          │               │               │               │         │
-│  ├─ AtomicWaker                                         1.824 ns      │ 2.638 ns      │ 1.845 ns      │ 1.863 ns      │ 100     │ 204800
-│  ├─ DiatomicWaker                                       1.102 ns      │ 1.143 ns      │ 1.112 ns      │ 1.117 ns      │ 100     │ 409600
-│  ├─ SpmcWaker                                           0.787 ns      │ 0.99 ns       │ 0.807 ns      │ 0.813 ns      │ 100     │ 409600
-│  ├─ SpmcWaker<spmc_waker::sync::Sequential, false>      0.766 ns      │ 0.96 ns       │ 0.777 ns      │ 0.778 ns      │ 100     │ 409600
-│  ├─ SpmcWaker<spmc_waker::sync::Sequential>             0.797 ns      │ 0.848 ns      │ 0.802 ns      │ 0.803 ns      │ 100     │ 409600
-│  ├─ SpmcWaker<spmc_waker::sync::Synchronized, false>    0.766 ns      │ 1.021 ns      │ 0.787 ns      │ 0.807 ns      │ 100     │ 409600
-│  ├─ SpmcWaker<spmc_waker::sync::Unsynchronized, false>  0.787 ns      │ 2.414 ns      │ 0.817 ns      │ 0.83 ns       │ 100     │ 409600
-│  ╰─ SpmcWaker<spmc_waker::sync::Unsynchronized>         0.787 ns      │ 0.99 ns       │ 0.817 ns      │ 0.826 ns      │ 100     │ 409600
-├─ register_overwrite                                                   │               │               │               │         │
-│  ├─ AtomicWaker                                         4.021 ns      │ 4.144 ns      │ 4.022 ns      │ 4.037 ns      │ 100     │ 102400
-│  ├─ DiatomicWaker                                       3.452 ns      │ 4.388 ns      │ 3.493 ns      │ 3.524 ns      │ 100     │ 204800
-│  ├─ SpmcWaker                                           3.94 ns       │ 7.318 ns      │ 4.022 ns      │ 4.145 ns      │ 100     │ 102400
-│  ├─ SpmcWaker<spmc_waker::sync::Sequential, false>      3.208 ns      │ 4.795 ns      │ 3.229 ns      │ 3.29 ns       │ 100     │ 204800
-│  ├─ SpmcWaker<spmc_waker::sync::Sequential>             3.147 ns      │ 6.239 ns      │ 3.239 ns      │ 3.382 ns      │ 100     │ 204800
-│  ├─ SpmcWaker<spmc_waker::sync::Synchronized, false>    3.981 ns      │ 4.958 ns      │ 4.225 ns      │ 4.225 ns      │ 100     │ 102400
-│  ├─ SpmcWaker<spmc_waker::sync::Unsynchronized, false>  2.903 ns      │ 3.981 ns      │ 2.943 ns      │ 3.103 ns      │ 100     │ 204800
-│  ╰─ SpmcWaker<spmc_waker::sync::Unsynchronized>         2.923 ns      │ 6.646 ns      │ 3.401 ns      │ 3.452 ns      │ 100     │ 204800
-├─ wake                                                                 │               │               │               │         │
-│  ├─ AtomicWaker                                         1.926 ns      │ 7.847 ns      │ 2.496 ns      │ 2.686 ns      │ 100     │ 204800
-│  ├─ DiatomicWaker                                       2.414 ns      │ 5.669 ns      │ 2.74 ns       │ 2.795 ns      │ 100     │ 204800
-│  ├─ SpmcWaker                                           1.194 ns      │ 3.126 ns      │ 1.245 ns      │ 1.349 ns      │ 100     │ 409600
-│  ├─ SpmcWaker<spmc_waker::sync::Sequential, false>      2.17 ns       │ 6.626 ns      │ 2.231 ns      │ 2.399 ns      │ 100     │ 204800
-│  ├─ SpmcWaker<spmc_waker::sync::Sequential>             1.194 ns      │ 2.18 ns       │ 1.194 ns      │ 1.24 ns       │ 100     │ 409600
-│  ├─ SpmcWaker<spmc_waker::sync::Synchronized, false>    2.15 ns       │ 2.353 ns      │ 2.19 ns       │ 2.187 ns      │ 100     │ 204800
-│  ├─ SpmcWaker<spmc_waker::sync::Unsynchronized, false>  2.15 ns       │ 4.998 ns      │ 2.19 ns       │ 2.213 ns      │ 100     │ 204800
-│  ╰─ SpmcWaker<spmc_waker::sync::Unsynchronized>         1.184 ns      │ 14.92 ns      │ 1.204 ns      │ 1.398 ns      │ 100     │ 409600
-├─ wake_cold                                                            │               │               │               │         │
-│  ├─ AtomicWaker                                         2.089 ns      │ 5.039 ns      │ 2.109 ns      │ 2.214 ns      │ 100     │ 204800
-│  ├─ DiatomicWaker                                       2.597 ns      │ 2.801 ns      │ 2.638 ns      │ 2.632 ns      │ 100     │ 204800
-│  ├─ SpmcWaker                                           1.804 ns      │ 1.886 ns      │ 1.845 ns      │ 1.837 ns      │ 100     │ 204800
-│  ├─ SpmcWaker<spmc_waker::sync::Sequential, false>      2.333 ns      │ 2.516 ns      │ 2.354 ns      │ 2.365 ns      │ 100     │ 204800
-│  ├─ SpmcWaker<spmc_waker::sync::Sequential>             1.804 ns      │ 1.885 ns      │ 1.845 ns      │ 1.836 ns      │ 100     │ 204800
-│  ├─ SpmcWaker<spmc_waker::sync::Synchronized, false>    2.353 ns      │ 2.821 ns      │ 2.374 ns      │ 2.371 ns      │ 100     │ 204800
-│  ├─ SpmcWaker<spmc_waker::sync::Unsynchronized, false>  2.353 ns      │ 4.327 ns      │ 2.374 ns      │ 2.412 ns      │ 100     │ 204800
-│  ╰─ SpmcWaker<spmc_waker::sync::Unsynchronized>         1.865 ns      │ 2.333 ns      │ 1.906 ns      │ 1.932 ns      │ 100     │ 204800
-╰─ wake_cold_empty                                                      │               │               │               │         │
-   ├─ AtomicWaker                                                       │               │               │               │         │
-   │  ├─ t=1                                              1.183 ns      │ 1.865 ns      │ 1.194 ns      │ 1.298 ns      │ 100     │ 409600
-   │  ├─ t=2                                              1.458 ns      │ 24.04 ns      │ 2.353 ns      │ 5.625 ns      │ 100     │ 102400
-   │  ╰─ t=4                                              1.822 ns      │ 54.06 ns      │ 28.35 ns      │ 24.17 ns      │ 100     │ 25600
-   ├─ DiatomicWaker                                                     │               │               │               │         │
-   │  ├─ t=1                                              1.173 ns      │ 2.638 ns      │ 1.926 ns      │ 1.85 ns       │ 100     │ 204800
-   │  ├─ t=2                                              2.231 ns      │ 9.718 ns      │ 6.809 ns      │ 5.861 ns      │ 100     │ 102400
-   │  ╰─ t=4                                              1.742 ns      │ 41.53 ns      │ 21.72 ns      │ 21.31 ns      │ 100     │ 51200
-   ├─ SpmcWaker                                                         │               │               │               │         │
-   │  ├─ t=1                                              1.489 ns      │ 1.601 ns      │ 1.509 ns      │ 1.509 ns      │ 100     │ 409600
-   │  ├─ t=2                                              1.947 ns      │ 7.053 ns      │ 3.91 ns       │ 4.024 ns      │ 100     │ 204800
-   │  ╰─ t=4                                              2.15 ns       │ 38.28 ns      │ 22.82 ns      │ 21.97 ns      │ 100     │ 51200
-   ├─ SpmcWaker<spmc_waker::sync::Sequential, false>                    │               │               │               │         │
-   │  ├─ t=1                                              0.12 ns       │ 0.24 ns       │ 0.123 ns      │ 0.129 ns      │ 100     │ 1638400
-   │  ├─ t=2                                              0.131 ns      │ 0.273 ns      │ 0.238 ns      │ 0.221 ns      │ 100     │ 819200
-   │  ╰─ t=4                                              0.171 ns      │ 0.253 ns      │ 0.243 ns      │ 0.234 ns      │ 100     │ 819200
-   ├─ SpmcWaker<spmc_waker::sync::Sequential>                           │               │               │               │         │
-   │  ├─ t=1                                              0.126 ns      │ 0.131 ns      │ 0.126 ns      │ 0.127 ns      │ 100     │ 1638400
-   │  ├─ t=2                                              0.131 ns      │ 0.248 ns      │ 0.237 ns      │ 0.225 ns      │ 100     │ 1638400
-   │  ╰─ t=4                                              0.169 ns      │ 0.248 ns      │ 0.24 ns       │ 0.216 ns      │ 100     │ 1638400
-   ├─ SpmcWaker<spmc_waker::sync::Synchronized, false>                  │               │               │               │         │
-   │  ├─ t=1                                              1.479 ns      │ 2.191 ns      │ 1.519 ns      │ 1.604 ns      │ 100     │ 204800
-   │  ├─ t=2                                              1.702 ns      │ 15.08 ns      │ 2.11 ns       │ 2.932 ns      │ 100     │ 102400
-   │  ╰─ t=4                                              1.662 ns      │ 26.56 ns      │ 4.591 ns      │ 8.182 ns      │ 100     │ 25600
-   ├─ SpmcWaker<spmc_waker::sync::Unsynchronized, false>                │               │               │               │         │
-   │  ├─ t=1                                              0.146 ns      │ 0.894 ns      │ 0.156 ns      │ 0.173 ns      │ 100     │ 819200
-   │  ├─ t=2                                              0.161 ns      │ 0.309 ns      │ 0.253 ns      │ 0.234 ns      │ 100     │ 819200
-   │  ╰─ t=4                                              0.192 ns      │ 0.314 ns      │ 0.273 ns      │ 0.259 ns      │ 100     │ 819200
-   ╰─ SpmcWaker<spmc_waker::sync::Unsynchronized>                       │               │               │               │         │
-      ├─ t=1                                              0.146 ns      │ 0.156 ns      │ 0.151 ns      │ 0.152 ns      │ 100     │ 1638400
-      ├─ t=2                                              0.192 ns      │ 0.304 ns      │ 0.273 ns      │ 0.265 ns      │ 100     │ 819200
-      ╰─ t=4                                              0.192 ns      │ 0.304 ns      │ 0.273 ns      │ 0.259 ns      │ 100     │ 819200```
