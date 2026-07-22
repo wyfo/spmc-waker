@@ -188,7 +188,7 @@ pub struct SpmcWaker<
     /// Ghost field used to check that `Waker::wake_by_ref` is
     /// correctly synchronized with `Waker::drop`.
     #[cfg(any(loom, miri))]
-    waker_cells: [Cell<u8>; 256], // 256 should cover any loom/miri test.
+    waker_cells: [Cell<u8>; 32], // 32 should cover any loom/miri test.
     _sync: PhantomData<S>,
     _registration: PhantomData<R>,
 }
@@ -216,6 +216,10 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> Drop
     fn drop(&mut self) {
         let state = self.state.load(Relaxed);
         if state.has(REGISTERED) || (CACHING && state.has(CACHED)) {
+            #[cfg(loom)]
+            if ::loom::thread::panicking() {
+                return;
+            }
             drop(self.load_waker().confirm(state));
         }
     }

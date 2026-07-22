@@ -27,13 +27,15 @@ BUILD_CMD = [
 ]
 # Try the cheap preemption bound first; escalate only if the downgrade still passes.
 PREEMPTIONS = [1, 2]
-# `basic_notification` is a broad, slow test imported verbatim from tokio's
-# suite; skipping it is the bulk of the speed-up, and the other tests still catch
-# every downgrade. A skip-list is deliberate over an allow-list of the catching
-# tests: those are local and may be renamed (silently dropping coverage), whereas
-# `basic_notification` has a stable name inherited from tokio. A downgrade only
-# it caught would surface as "may be unnecessary".
-SKIP_TESTS = ["basic_notification"]
+# `no_missed_wakeup` alone now catches every downgrade, so run only it: the rest of the
+# suite (notably `basic_notification`, a broad, slow test imported verbatim from
+# tokio) is redundant for this check and much slower. Naming the test to run
+# rather than skipping the slow ones means a rename of `no_missed_wakeup` would silently
+# run nothing — but that fails loud here, as *every* ordering reported "may be
+# unnecessary", rather than as a quiet coverage gap. Positional filters are
+# substring-matched against the full test name, so `no_missed_wakeup` selects every
+# `no_missed_wakeup::case_*` rstest instantiation.
+TEST_FILTERS = ["no_missed_wakeup"]
 
 DOWNGRADE = {
     "SeqCst": ["AcqRel", "Acquire", "Release"],
@@ -123,31 +125,15 @@ def build_binary():
     return exe
 
 
-def skip_args():
-    args = []
-    for name in SKIP_TESTS:
-        args += ["--skip", name]
-    return args
-
-
-# A downgraded ordering does not always surface as a clean libtest `... FAILED`:
-# a broken ordering could make loom explore a divergent execution that overflows
-# the stack, aborting the process before any result is printed. So "caught" means
-# "did not cleanly pass" — a named failing test, or `CRASHED` if the process died
-# — and "unnecessary" is concluded only from a *positive* clean pass, never from
-# the absence of a FAILED line.
-CRASHED = "<crashed>"
-
-
 def run_tests(binary, downgrade):
     """Run the suite with the downgrade applied, escalating the preemption bound.
-    Return (test, preemptions) for the first test that catches it (`test` may be
-    `CRASHED`), or None if it cleanly passes at every bound (the ordering may be
-    unnecessary)."""
+    Return (test, preemptions) for the first test that catches it, or None if it
+    cleanly passes at every bound (the ordering may be unnecessary). Aborts the
+    whole run if the binary neither passes cleanly nor names a failing test."""
     for p in PREEMPTIONS:
         env = {**os.environ, "LOOM_MAX_PREEMPTIONS": str(p), "LOOM_DOWNGRADE": downgrade}
         proc = subprocess.Popen(
-            [binary, *skip_args()], env=env,
+            [binary, *TEST_FILTERS], env=env,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
         )
         clean = False
@@ -160,8 +146,16 @@ def run_tests(binary, downgrade):
             if line.startswith("test result: ok"):
                 clean = True
         proc.wait()
-        if not (proc.returncode == 0 and clean):
-            return CRASHED, p
+        # Panics from a downgraded ordering are caught and reported as a named
+        # `... FAILED`, so the only expected outcomes are a FAILED line or a clean
+        # pass. Anything else (a nonzero exit with no result, e.g. a stack
+        # overflow from a divergent loom execution) is a real problem, not a
+        # "catch": abort rather than silently reading it as coverage.
+        if proc.returncode != 0 or not clean:
+            sys.exit(
+                f"test binary crashed for downgrade {downgrade!r} at "
+                f"LOOM_MAX_PREEMPTIONS={p} (exit {proc.returncode})"
+            )
         # Cleanly passed; try a higher preemption bound before giving up.
     return None
 
