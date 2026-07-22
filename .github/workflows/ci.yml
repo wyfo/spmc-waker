@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        features: [--no-default-features, --all-features]
+        features: [ --no-default-features, --all-features ]
     steps:
       - uses: actions/checkout@v4
       - name: update toolchain
@@ -32,7 +32,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: loom
+      - name: clippy
+        run: cargo clippy
+        env:
+          RUSTFLAGS: "--cfg loom"
+      - name: test
         run: cargo test --tests --release
         env:
           RUSTFLAGS: "--cfg loom -C debug_assertions"
@@ -46,7 +50,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        seeds: [0..256, 256..512, 512..768, 768..1024, 1024..1280, 1280..1536, 1536..1792, 1792..2048]
+        seeds: [ 0..256, 256..512, 512..768, 768..1024, 1024..1280, 1280..1536, 1536..1792, 1792..2048 ]
     steps:
       - uses: actions/checkout@v4
       - name: install miri
@@ -60,9 +64,9 @@ jobs:
     needs: test
     strategy:
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        os: [ ubuntu-24.04, ubuntu-24.04-arm ]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
       - name: benchmark
-        run: cargo bench -- --min-time 1
+        run: cargo bench -- --min-time 0.1
