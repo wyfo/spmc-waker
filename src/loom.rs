@@ -112,23 +112,23 @@ static DOWNGRADE: LazyLock<Option<(u32, Downgrade)>> = LazyLock::new(|| {
 
 #[track_caller]
 fn handle_downgrade(order: Ordering) -> Ordering {
-    if let Some(&(line, Downgrade::Ordering { from, to })) = DOWNGRADE.as_ref()
-        && from == order
-        && Location::caller().line() == line
-    {
-        return to;
+    match DOWNGRADE.as_ref() {
+        Some(&(line, Downgrade::Ordering { from, to }))
+            if from == order && Location::caller().line() == line =>
+        {
+            to
+        }
+        _ => order,
     }
-    order
 }
 
 // ========== Atomics wrapping ==========
 
 #[track_caller]
 pub fn fence(order: Ordering) {
-    if let Some(&(line, Downgrade::Fence)) = DOWNGRADE.as_ref()
-        && Location::caller().line() == line
-    {
-        return;
+    match DOWNGRADE.as_ref() {
+        Some(&(line, Downgrade::Fence)) if Location::caller().line() == line => return,
+        _ => {}
     }
     loom::sync::atomic::fence(order);
     loom_trace!("fence({order:?})");

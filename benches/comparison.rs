@@ -7,9 +7,9 @@ use std::{
 use diatomic_waker::DiatomicWaker;
 use divan::Bencher;
 use spmc_waker::{
-    SpmcWaker,
     registration::{RegistrationPolicy, Strict, Unchecked},
     synchronization::{Sequential, Synchronization, Synchronized, Unsynchronized},
+    SpmcWaker,
 };
 
 trait AtomicWaker: Default + Send + Sync + 'static {

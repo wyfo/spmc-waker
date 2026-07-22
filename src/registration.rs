@@ -5,9 +5,9 @@ use core::{
 };
 
 use crate::{
-    Registered, SpmcWaker,
     synchronization::Synchronization,
     wait_until::{WaitUntil, WakeCondition},
+    Registered, SpmcWaker,
 };
 
 /// Generic parameter of [`SpmcWaker`] which determines the policy for enforcing single waker

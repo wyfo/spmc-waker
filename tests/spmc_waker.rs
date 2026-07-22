@@ -6,8 +6,8 @@ use std::{
     marker::PhantomData,
     ptr,
     sync::{
-        Arc, OnceLock,
         atomic::Ordering::{Acquire, Relaxed, Release, SeqCst},
+        Arc, OnceLock,
     },
     task::{RawWaker, RawWakerVTable, Wake, Waker},
 };
@@ -15,7 +15,7 @@ use std::{
 use std::{
     hint::spin_loop,
     panic::catch_unwind,
-    sync::atomic::{AtomicUsize, fence},
+    sync::atomic::{fence, AtomicUsize},
     task::Poll,
     thread,
 };
@@ -26,12 +26,12 @@ use futures::executor::block_on;
 use loom::hint::spin_loop;
 use rstest::rstest;
 #[cfg(loom)]
-use spmc_waker::loom::{AtomicUsize, fence};
+use spmc_waker::loom::{fence, AtomicUsize};
 use spmc_waker::{
-    SpmcWaker,
     registration::{Lenient, RegistrationPolicy, Strict, Unchecked},
     synchronization::{Sequential, Synchronization, Synchronized, Unsynchronized},
     wait_until::WakeCondition,
+    SpmcWaker,
 };
 
 #[cfg(loom)]
@@ -47,11 +47,11 @@ mod thread {
     use std::{
         cell::RefCell,
         marker::PhantomData,
-        panic::{AssertUnwindSafe, catch_unwind},
+        panic::{catch_unwind, AssertUnwindSafe},
     };
 
-    use loom::thread::JoinHandle;
     pub use loom::thread::spawn;
+    use loom::thread::JoinHandle;
 
     #[derive(Default)]
     pub struct Scope<'env> {
@@ -124,7 +124,7 @@ mod thread {
 // https://github.com/tokio-rs/loom/issues/416
 // so here is a wrapper to make it stable
 #[cfg(loom)]
-fn block_on<F: Future>(f: F) -> F::Output {
+fn block_on<F: core::future::Future>(f: F) -> F::Output {
     let mut f = core::pin::pin!(f);
     loom::future::block_on(poll_fn(|cx| {
         let waker = cx.waker().clone();
@@ -272,6 +272,7 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> SpmcWakerEx
     fn init(mode: InitMode, waker: &Waker) -> Self {
         assert!(mode.is_compatible(CACHING));
         let this = SpmcWaker::new();
+        #[allow(clippy::incompatible_msrv)] // Waker::noop is 1.85
         match mode {
             InitMode::None => {}
             InitMode::NoopRegistered => this.register2(Waker::noop()),

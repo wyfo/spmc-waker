@@ -36,10 +36,10 @@ use loom as atomic;
 use portable_atomic as atomic;
 
 use crate::{
-    atomic::{AtomicPtr, AtomicUsize, fence},
+    atomic::{fence, AtomicPtr, AtomicUsize},
     registration::{RegistrationMode, RegistrationPolicy, SafeRegistration, Strict, Unchecked},
     state_machine::{
-        AtomicState, CACHED, FLAGS_MASK, REGISTERED, REGISTERING, REGISTRATION_INCR, State,
+        AtomicState, State, CACHED, FLAGS_MASK, REGISTERED, REGISTERING, REGISTRATION_INCR,
     },
     synchronization::{SyncMode, Synchronization, Synchronized},
     utils::{ConfirmedWaker, PendingWaker, TaggedExt},
@@ -115,8 +115,8 @@ pub mod wait_until;
 /// use std::{
 ///     pin::Pin,
 ///     sync::{
-///         Arc,
 ///         atomic::{AtomicBool, Ordering::Relaxed},
+///         Arc,
 ///     },
 ///     task::{Context, Poll},
 /// };
@@ -155,6 +155,7 @@ pub mod wait_until;
 ///     }
 /// }
 ///
+/// # use std::future::Future; // because edition 2021
 /// impl Future for Waiter {
 ///     type Output = ();
 ///

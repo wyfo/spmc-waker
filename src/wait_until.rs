@@ -1,5 +1,6 @@
 //! [`SpmcWaker::wait_until`] associated types.
 use core::{
+    future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -29,12 +30,12 @@ impl<F, S: Synchronization, const CACHING: bool, R: RegistrationPolicy> Unpin
 }
 
 impl<
-    F: FnMut(bool) -> W,
-    W: WakeCondition,
-    S: Synchronization,
-    const CACHING: bool,
-    R: RegistrationPolicy,
-> Future for WaitUntil<'_, F, S, CACHING, R>
+        F: FnMut(bool) -> W,
+        W: WakeCondition,
+        S: Synchronization,
+        const CACHING: bool,
+        R: RegistrationPolicy,
+    > Future for WaitUntil<'_, F, S, CACHING, R>
 {
     type Output = W::Output;
     #[inline(always)]
