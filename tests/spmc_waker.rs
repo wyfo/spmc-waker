@@ -319,7 +319,7 @@ fn concurrent_register_and_wake<S: Synchronization, const CACHING: bool, R: Regi
             s.spawn(|| spmc.register2(&waker.waker()));
             s.spawn(|| spmc.wake());
         });
-        assert!(waker.wake_count() == 1 || spmc.registered().is_some());
+        assert!(waker.wake_count() == 1 || spmc.take().is_some());
     });
 }
 
@@ -350,7 +350,7 @@ fn register_synchronizes_with_wake<const CACHING: bool, R: RegistrationPolicy>(
                 let _ = wake_cond_loaded.set(wake_cond.load(Relaxed));
             });
         });
-        if spmc.registered().is_some() {
+        if spmc.take().is_some() {
             assert_eq!(*wake_cond_loaded.wait(), 1);
         }
     });
@@ -602,7 +602,6 @@ fn check_panic_recovered<S: Synchronization, const CACHING: bool, R: Registratio
     assert!(catch_unwind(|| op(&spmc)).is_err());
     let waker = TestWaker::new();
     spmc.register2(&waker.waker());
-    assert!(spmc.registered().is_some());
     spmc.wake();
     assert_eq!(waker.wake_count(), 1);
     drop(spmc);
@@ -647,8 +646,9 @@ fn drop_panic_in_unregister_can_be_recovered<S: Synchronization, R: Registration
     #[values(STRICT, UNCHECKED)] _reg: RegistrationMode<R>,
 ) {
     let spmc = SpmcWaker::<S, false, R>::new();
-    spmc.register2(&panic_on_drop());
-    check_panic_recovered(spmc, |spmc| spmc.registered().unwrap().unregister());
+    check_panic_recovered(spmc, |spmc| unsafe {
+        R::register(spmc, &panic_on_drop()).unregister();
+    });
 }
 
 #[cfg(not(loom))]

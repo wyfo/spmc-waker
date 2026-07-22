@@ -1,6 +1,6 @@
 asm_take_asm:
 	ldar x8, [x0]
-	tbz w8, #0, .LBB4_2
+	tbz w8, #0, .LBB3_2
 	sub x9, x8, #1
 	mov x10, x8
 	ldr x1, [x0, #8]
@@ -9,6 +9,6 @@ asm_take_asm:
 	cmp x10, x8
 	csel x0, x11, xzr, eq
 	ret
-.LBB4_2:
+.LBB3_2:
 	mov x0, xzr
 	ret

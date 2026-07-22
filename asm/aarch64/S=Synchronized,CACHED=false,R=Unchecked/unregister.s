@@ -1,13 +1,13 @@
 asm_unregister_asm:
-	ldp x10, x9, [x0]
-	sub x11, x9, #1
-	mov x12, x9
-	ldr x0, [x10, #8]
-	ldr x8, [x10, #16]
-	cas x12, x11, [x10]
-	cmp x12, x9
-	b.ne .LBB6_2
-	ldr x1, [x8, #24]
+	mov x8, x0
+	sub x10, x1, #1
+	mov x11, x1
+	ldr x0, [x0, #8]
+	ldr x9, [x8, #16]
+	cas x11, x10, [x8]
+	cmp x11, x1
+	b.ne .LBB5_2
+	ldr x1, [x9, #24]
 	br x1
-.LBB6_2:
+.LBB5_2:
 	ret

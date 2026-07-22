@@ -5,7 +5,7 @@ use core::{
 };
 
 use crate::{
-    RegisteredWaker, SpmcWaker,
+    Registered, SpmcWaker,
     synchronization::Synchronization,
     wait_until::{WaitUntil, WakeCondition},
 };
@@ -26,8 +26,8 @@ pub trait RegistrationPolicy:
     unsafe fn register<'a, S: Synchronization, const CACHING: bool>(
         spmc_waker: &'a SpmcWaker<S, CACHING, Self>,
         waker: &Waker,
-    ) -> RegisteredWaker<'a, S, CACHING, Self> {
-        RegisteredWaker::new(spmc_waker, spmc_waker.register_impl(waker), false)
+    ) -> Registered<'a, S, CACHING, Self> {
+        spmc_waker.register_impl(waker)
     }
 
     #[doc(hidden)]

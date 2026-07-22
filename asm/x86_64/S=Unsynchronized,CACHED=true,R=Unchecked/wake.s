@@ -6,7 +6,7 @@ asm_wake_asm:
 	push rbx
 	mov r15, qword ptr [rdi]
 	test r15b, 1
-	je .LBB7_8
+	je .LBB6_8
 	mov r14, rdi
 	#MEMBARRIER
 	mov rbx, qword ptr [rdi + 8]
@@ -14,22 +14,22 @@ asm_wake_asm:
 	lea r12, [r15 - 1]
 	mov rax, r15
 	lock cmpxchg	qword ptr [rdi], r12
-	jne .LBB7_8
+	jne .LBB6_8
 	mov rdi, rbx
 	mov r13, rcx
 	call qword ptr [rcx + 16]
 	inc r15
 	mov rax, r12
 	lock cmpxchg	qword ptr [r14], r15
-	jne .LBB7_4
-.LBB7_8:
+	jne .LBB6_4
+.LBB6_8:
 	pop rbx
 	pop r12
 	pop r13
 	pop r14
 	pop r15
 	ret
-.LBB7_4:
+.LBB6_4:
 	mov rax, r13
 	mov rdi, rbx
 	pop rbx

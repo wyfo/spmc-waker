@@ -62,6 +62,14 @@ check_unit() {
     local asm_file="$arch/$dir/$name.s"
 
     if [[ "$MODE" != "--check" ]]; then
+        # An empty result means the function was inlined away (e.g. a small
+        # wake_impl_cold gets inlined despite #[cold]). Drop any stale
+        # reference instead of leaving an empty file behind.
+        if [[ -z "$actual" ]]; then
+            rm -f "$asm_file"
+            echo "removed (inlined): $label"
+            return 0
+        fi
         mkdir -p "$(dirname "$asm_file")"
         printf '%s\n' "$actual" > "$asm_file"
         echo "updated: $label"
@@ -90,7 +98,7 @@ for arch_entry in "${ARCHES[@]}"; do
 
         # ── hot-path functions ────────────────────────────────────────────
 
-        for op in take wake wake_cold register unregister poll_wait_until registered; do
+        for op in take wake wake_cold register unregister poll_wait_until; do
             check_unit "$arch" "$target" "$extra" "$dir" "$cfg" "asm_${op}_asm" "$op" &
             pids+=("$!")
         done

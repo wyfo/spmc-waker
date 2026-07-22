@@ -1,9 +1,9 @@
 asm_take_asm:
 	ldr x8, [x0]
-	tbnz w8, #0, .LBB4_2
+	tbnz w8, #0, .LBB3_2
 	mov x0, xzr
 	ret
-.LBB4_2:
+.LBB3_2:
 	dmb ishld
 	sub x9, x8, #1
 	mov x10, x8

@@ -25,7 +25,7 @@ asm_register_asm:
 	jmp spmc_waker::SpmcWaker<S,_,R>::register_impl_cold
 .LBB3_7:
 	push rax
-	lea rdi, [rip + .Lanon.8d71c8851bc03468f628dced9b2f7f7b.0]
-	lea rdx, [rip + .Lanon.8d71c8851bc03468f628dced9b2f7f7b.2]
+	lea rdi, [rip + .Lanon.40943f74b53f8fa4249390633cadaabd.0]
+	lea rdx, [rip + .Lanon.40943f74b53f8fa4249390633cadaabd.2]
 	mov esi, 47
 	call qword ptr [rip + core::panicking::panic_fmt@GOTPCREL]

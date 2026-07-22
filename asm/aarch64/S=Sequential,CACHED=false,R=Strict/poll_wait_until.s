@@ -66,10 +66,10 @@ asm_poll_wait_until_asm:
 	ldp x29, x30, [sp], #48
 	ret
 .LBB1_12:
-	adrp x0, .Lanon.8d71c8851bc03468f628dced9b2f7f7b.0
-	add x0, x0, :lo12:.Lanon.8d71c8851bc03468f628dced9b2f7f7b.0
-	adrp x2, .Lanon.8d71c8851bc03468f628dced9b2f7f7b.2
-	add x2, x2, :lo12:.Lanon.8d71c8851bc03468f628dced9b2f7f7b.2
+	adrp x0, .Lanon.40943f74b53f8fa4249390633cadaabd.0
+	add x0, x0, :lo12:.Lanon.40943f74b53f8fa4249390633cadaabd.0
+	adrp x2, .Lanon.40943f74b53f8fa4249390633cadaabd.2
+	add x2, x2, :lo12:.Lanon.40943f74b53f8fa4249390633cadaabd.2
 	mov w1, #47
 	bl core::panicking::panic_fmt
 	swpal x19, x8, [x21]

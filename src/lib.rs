@@ -277,17 +277,17 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> SpmcWaker<S
             return Poll::Ready(out);
         }
         // Register the waker
-        let state = self.register_impl(cx.waker());
+        let registered = self.register_impl(cx.waker());
         // Check the wake condition **after** registering the waker.
         if let Some(out) = wake_condition(true).try_into_output() {
-            self.unregister_impl(state);
+            registered.unregister();
             return Poll::Ready(out);
         }
         Poll::Pending
     }
 
     #[inline(always)]
-    fn register_impl(&self, waker: &Waker) -> State {
+    fn register_impl(&self, waker: &Waker) -> Registered<'_, S, CACHING, R> {
         // Load the state. If CACHING, the state must be loaded with Acquire ordering
         // to synchronize with the Release CAS setting the CACHED flag (which is supposed
         // to be the common case); if R::SAFE, this is already done by `set_registering`.
@@ -302,12 +302,12 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> SpmcWaker<S
         if R::SAFE {
             match self.set_registering(state) {
                 Ok(s) => state = s,
-                Err(s) => return s,
+                Err(s) => return Registered::new(self, s),
             }
         }
         // If CACHING and the same waker is cached, then the state must just be
         // set back to REGISTERED, no need to touch the waker.
-        if CACHING && state.has(CACHED) && self.load_waker().will_wake(waker) {
+        let state = if CACHING && state.has(CACHED) && self.load_waker().will_wake(waker) {
             // The registration counter must still be incremented, even though the
             // waker is untouched: with a state value identical to the previous
             // registration, a waking thread could pair its acquire fence with the
@@ -324,7 +324,8 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> SpmcWaker<S
         // Other cases fall in cold path
         } else {
             self.register_impl_cold(waker, state)
-        }
+        };
+        Registered::new(self, state)
     }
 
     #[inline]
@@ -495,43 +496,6 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> SpmcWaker<S
             // Then the new waker can be registered.
             self.register_waker(new_state, new_state, Some(waker))
         }
-    }
-
-    #[inline(always)]
-    fn unregister_impl(&self, state: State) {
-        // Try unregistering the waker, caching it if it is enabled, or dropping it.
-        debug_assert!(state.has(REGISTERED) && !state.has(CACHED | REGISTERING));
-        let mut new_state = state.unset(REGISTERED);
-        if CACHING {
-            new_state = new_state.set(CACHED);
-        }
-        // If no caching, load the waker before claiming its ownership.
-        let waker = (!CACHING).then(|| self.load_waker());
-        match (self.state).compare_exchange(state, new_state, Relaxed, Relaxed) {
-            Ok(_) if !CACHING => drop(waker.unwrap().confirm(state)),
-            _ => {}
-        }
-    }
-
-    /// Returns a [`RegisteredWaker`] token to manipulate the latest registered
-    /// waker, if there is one.
-    ///
-    /// This provides a best-effort snapshot: a concurrent [`wake`] call may
-    /// consume the waker right after this returns `Some`, and a concurrent
-    /// [`register`] call may store one right after this returns `None`.
-    ///
-    /// Calling `registered` then `RegisteredWaker::wake` is guaranteed to
-    /// provide the same synchronization as calling `wake` alone.
-    ///
-    /// This method can be used to do additional things before/after waking a
-    /// task, like strengthening the ordering of the wake condition.
-    ///
-    /// [`register`]: Self::register
-    /// [`wake`]: Self::wake
-    #[inline]
-    pub fn registered(&self) -> Option<RegisteredWaker<'_, S, CACHING, R>> {
-        let (state, released) = self.registered_impl()?;
-        Some(RegisteredWaker::new(self, state, released))
     }
 
     fn registered_impl(&self) -> Option<(State, S::Released)> {
@@ -736,7 +700,7 @@ impl<S: Synchronization, const CACHING: bool, R: SafeRegistration> SpmcWaker<S, 
     /// As a consequence, `register` should be called **each** time a task requires a
     /// wakeup.
     ///
-    /// Returns a [`RegisteredWaker`] token, which can be used to unregister the waker if
+    /// Returns a [`Registered`] token, which can be used to unregister the waker if
     /// the wake condition is met, avoiding spurious wakeup.
     ///
     /// See [`poll_wait_until`](Self::poll_wait_until) documentation about how to use
@@ -747,8 +711,8 @@ impl<S: Synchronization, const CACHING: bool, R: SafeRegistration> SpmcWaker<S, 
     /// Panics if this method is called concurrently from multiple threads unless `R=Lenient`,
     /// in which case registration might fail silently.
     #[inline]
-    pub fn register(&self, waker: &Waker) -> RegisteredWaker<'_, S, CACHING, R> {
-        RegisteredWaker::new(self, self.register_impl(waker), false)
+    pub fn register(&self, waker: &Waker) -> Registered<'_, S, CACHING, R> {
+        self.register_impl(waker)
     }
 }
 
@@ -825,7 +789,7 @@ impl<S: Synchronization, const CACHING: bool> SpmcWaker<S, CACHING, Unchecked> {
     /// As a consequence, `register` should be called **each** time a task requires a
     /// wakeup.
     ///
-    /// Returns a [`RegisteredWaker`] token, which can be used to unregister the waker if
+    /// Returns a [`Registered`] token, which can be used to unregister the waker if
     /// the wake condition is met, avoiding spurious wakeup.
     ///
     /// See [`poll_wait_until`](Self::poll_wait_until) documentation about how to use
@@ -835,8 +799,8 @@ impl<S: Synchronization, const CACHING: bool> SpmcWaker<S, CACHING, Unchecked> {
     ///
     /// This method must not be called concurrently from multiple threads.
     #[inline]
-    pub unsafe fn register(&self, waker: &Waker) -> RegisteredWaker<'_, S, CACHING, Unchecked> {
-        RegisteredWaker::new(self, self.register_impl(waker), false)
+    pub unsafe fn register(&self, waker: &Waker) -> Registered<'_, S, CACHING, Unchecked> {
+        self.register_impl(waker)
     }
 }
 
@@ -849,7 +813,7 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> Default
 }
 
 /// Token returned by [`SpmcWaker::register`] to unregister the waker if the wake condition is met.
-pub struct RegisteredWaker<
+pub struct Registered<
     'a,
     S: Synchronization = Synchronized,
     const CACHING: bool = false,
@@ -857,42 +821,31 @@ pub struct RegisteredWaker<
 > {
     spmc_waker: &'a SpmcWaker<S, CACHING, R>,
     state: State,
-    released: S::Released,
 }
 
 impl<'a, S: Synchronization, const CACHING: bool, R: RegistrationPolicy>
-    RegisteredWaker<'a, S, CACHING, R>
+    Registered<'a, S, CACHING, R>
 {
-    fn new(
-        spmc_waker: &'a SpmcWaker<S, CACHING, R>,
-        state: State,
-        released: impl Into<S::Released>,
-    ) -> Self {
+    #[inline(always)]
+    fn new(spmc_waker: &'a SpmcWaker<S, CACHING, R>, state: State) -> Self {
         debug_assert!(state.has(REGISTERED));
-        Self {
-            spmc_waker,
-            state,
-            released: released.into(),
-        }
+        Self { spmc_waker, state }
     }
 
     /// Unregisters the previously registered waker.
     ///
     /// It allows avoiding spurious wakeups if the wake condition is already met.
+    #[inline]
     pub fn unregister(self) {
-        self.spmc_waker.unregister_impl(self.state);
-    }
-
-    /// Consumes the `Waker` and wakes its task.
-    pub fn wake(self) {
-        self.spmc_waker.wake_impl(self.state, self.released);
-    }
-
-    /// Consumes the `Waker` and returns it.
-    pub fn take(self) -> Option<Waker> {
-        let (waker, _) = self.spmc_waker.take_impl(self.state, self.released)?;
-        #[cfg(any(loom, miri))]
-        let waker = waker.get();
-        Some(waker)
+        let mut new_state = self.state.unset(REGISTERED);
+        if CACHING {
+            new_state = new_state.set(CACHED);
+        }
+        // If no caching, load the waker before claiming its ownership.
+        let waker = (!CACHING).then(|| self.spmc_waker.load_waker());
+        match (self.spmc_waker.state).compare_exchange(self.state, new_state, Relaxed, Relaxed) {
+            Ok(_) if !CACHING => drop(waker.unwrap().confirm(self.state)),
+            _ => {}
+        }
     }
 }

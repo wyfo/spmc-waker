@@ -6,8 +6,8 @@ asm_unregister_asm:
 	ldr x9, [x8, #16]
 	cas x11, x10, [x8]
 	cmp x11, x1
-	b.ne .LBB5_2
+	b.ne .LBB4_2
 	ldr x1, [x9, #24]
 	br x1
-.LBB5_2:
+.LBB4_2:
 	ret

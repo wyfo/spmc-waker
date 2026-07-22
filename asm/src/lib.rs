@@ -48,13 +48,8 @@ unsafe fn asm_register_asm(spmc: &SpmcWaker, waker: &Waker) {
 }
 
 #[unsafe(no_mangle)]
-unsafe fn asm_unregister_asm(registered: spmc_waker::RegisteredWaker<'_, S, CACHED, R>) {
+unsafe fn asm_unregister_asm(registered: spmc_waker::Registered<'_, S, CACHED, R>) {
     registered.unregister();
-}
-
-#[unsafe(no_mangle)]
-fn asm_registered_asm(spmc: &SpmcWaker) -> Option<spmc_waker::RegisteredWaker<'_, S, CACHED, R>> {
-    spmc.registered()
 }
 
 #[unsafe(no_mangle)]
