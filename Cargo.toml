@@ -5,16 +5,16 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/wyfo/spmc-waker"
 keywords = [
-  "atomic",
-  "lock-free",
-  "no-std",
-  "mpsc",
-  "async",
+    "atomic",
+    "lock-free",
+    "no-std",
+    "mpsc",
+    "async",
 ]
 categories = [
-  "concurrency",
-  "data-structures",
-  "no-std",
+    "concurrency",
+    "data-structures",
+    "no-std",
 ]
 repository = "https://github.com/wyfo/spmc-waker"
 description = "A cached SPMC atomic waker."
@@ -45,7 +45,7 @@ loom = { version = "0.7.2", features = ["futures"] }
 const_fn = "0.4.12"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(coverage_nightly)'] }
 unsafe_op_in_unsafe_fn = "deny"
 
 [lints.clippy]

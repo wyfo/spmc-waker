@@ -6,19 +6,25 @@ use std::{
 
 use diatomic_waker::DiatomicWaker;
 use divan::Bencher;
-use spmc_waker::{Sequential, SpmcWaker, Synchronization, Synchronized, Unsynchronized};
+use spmc_waker::{
+    SpmcWaker,
+    registration::{RegistrationPolicy, Strict, Unchecked},
+    synchronization::{Sequential, Synchronization, Synchronized, Unsynchronized},
+};
 
 trait AtomicWaker: Default + Send + Sync + 'static {
-    unsafe fn register(&self, waker: &Waker);
+    fn register(&self, waker: &Waker);
     fn wake(&self);
     fn wake_cold(&self) {
         self.wake();
     }
 }
 
-impl<S: Synchronization, const CACHED: bool> AtomicWaker for SpmcWaker<S, CACHED> {
-    unsafe fn register(&self, waker: &Waker) {
-        unsafe { self.register(waker) };
+impl<S: Synchronization, const CACHED: bool, R: RegistrationPolicy> AtomicWaker
+    for SpmcWaker<S, CACHED, R>
+{
+    fn register(&self, waker: &Waker) {
+        unsafe { R::register(self, waker) };
     }
     fn wake(&self) {
         self.wake();
@@ -29,7 +35,7 @@ impl<S: Synchronization, const CACHED: bool> AtomicWaker for SpmcWaker<S, CACHED
 }
 
 impl AtomicWaker for futures::task::AtomicWaker {
-    unsafe fn register(&self, waker: &Waker) {
+    fn register(&self, waker: &Waker) {
         self.register(waker);
     }
     fn wake(&self) {
@@ -38,7 +44,7 @@ impl AtomicWaker for futures::task::AtomicWaker {
 }
 
 impl AtomicWaker for DiatomicWaker {
-    unsafe fn register(&self, waker: &Waker) {
+    fn register(&self, waker: &Waker) {
         unsafe { self.register(waker) };
     }
     fn wake(&self) {
@@ -58,71 +64,71 @@ fn fake_waker() -> Waker {
     black_box(Waker::from(Arc::new(FakeWaker)))
 }
 
-#[divan::bench(types = [SpmcWaker<Synchronized, false>, SpmcWaker<Synchronized, true>, SpmcWaker<Sequential, false>, SpmcWaker<Sequential, true>, SpmcWaker<Unsynchronized, false>, SpmcWaker<Unsynchronized, true>, futures::task::AtomicWaker, DiatomicWaker])]
+#[divan::bench(types = [SpmcWaker<Synchronized, false, Strict>, SpmcWaker<Synchronized, true, Strict>, SpmcWaker<Sequential, false, Strict>, SpmcWaker<Sequential, true, Strict>, SpmcWaker<Unsynchronized, false, Strict>, SpmcWaker<Unsynchronized, true, Strict>, SpmcWaker<Synchronized, false, Unchecked>, SpmcWaker<Synchronized, true, Unchecked>, SpmcWaker<Sequential, false, Unchecked>, SpmcWaker<Sequential, true, Unchecked>, SpmcWaker<Unsynchronized, false, Unchecked>, SpmcWaker<Unsynchronized, true, Unchecked>, futures::task::AtomicWaker, DiatomicWaker])]
 fn register<W: AtomicWaker>(bencher: Bencher) {
     let waker = fake_waker();
     bencher
         .with_inputs(|| {
             let atomic_waker = W::default();
-            unsafe { atomic_waker.register(&waker) };
+            atomic_waker.register(&waker);
             atomic_waker.wake();
             atomic_waker
         })
-        .bench_local_refs(|atomic_waker| unsafe { atomic_waker.register(&waker) });
+        .bench_local_refs(|atomic_waker| atomic_waker.register(&waker));
 }
 
-#[divan::bench(types = [SpmcWaker<Synchronized, false>, SpmcWaker<Synchronized, true>, SpmcWaker<Sequential, false>, SpmcWaker<Sequential, true>, SpmcWaker<Unsynchronized, false>, SpmcWaker<Unsynchronized, true>, futures::task::AtomicWaker, DiatomicWaker])]
+#[divan::bench(types = [SpmcWaker<Synchronized, false, Strict>, SpmcWaker<Synchronized, true, Strict>, SpmcWaker<Sequential, false, Strict>, SpmcWaker<Sequential, true, Strict>, SpmcWaker<Unsynchronized, false, Strict>, SpmcWaker<Unsynchronized, true, Strict>, SpmcWaker<Synchronized, false, Unchecked>, SpmcWaker<Synchronized, true, Unchecked>, SpmcWaker<Sequential, false, Unchecked>, SpmcWaker<Sequential, true, Unchecked>, SpmcWaker<Unsynchronized, false, Unchecked>, SpmcWaker<Unsynchronized, true, Unchecked>, futures::task::AtomicWaker, DiatomicWaker])]
 fn register_already_registered<W: AtomicWaker>(bencher: Bencher) {
     let waker = fake_waker();
     bencher
         .with_inputs(|| {
             let atomic_waker = W::default();
-            unsafe { atomic_waker.register(&waker) };
+            atomic_waker.register(&waker);
             atomic_waker
         })
-        .bench_local_refs(|atomic_waker| unsafe { atomic_waker.register(&waker) });
+        .bench_local_refs(|atomic_waker| atomic_waker.register(&waker));
 }
 
-#[divan::bench(types = [SpmcWaker<Synchronized, false>, SpmcWaker<Synchronized, true>, SpmcWaker<Sequential, false>, SpmcWaker<Sequential, true>, SpmcWaker<Unsynchronized, false>, SpmcWaker<Unsynchronized, true>, futures::task::AtomicWaker, DiatomicWaker])]
+#[divan::bench(types = [SpmcWaker<Synchronized, false, Strict>, SpmcWaker<Synchronized, true, Strict>, SpmcWaker<Sequential, false, Strict>, SpmcWaker<Sequential, true, Strict>, SpmcWaker<Unsynchronized, false, Strict>, SpmcWaker<Unsynchronized, true, Strict>, SpmcWaker<Synchronized, false, Unchecked>, SpmcWaker<Synchronized, true, Unchecked>, SpmcWaker<Sequential, false, Unchecked>, SpmcWaker<Sequential, true, Unchecked>, SpmcWaker<Unsynchronized, false, Unchecked>, SpmcWaker<Unsynchronized, true, Unchecked>, futures::task::AtomicWaker, DiatomicWaker])]
 fn register_overwrite<W: AtomicWaker>(bencher: Bencher) {
     let waker1 = fake_waker();
     let waker2 = fake_waker();
     bencher
         .with_inputs(|| {
             let atomic_waker = W::default();
-            unsafe { atomic_waker.register(&waker1) };
+            atomic_waker.register(&waker1);
             atomic_waker
         })
         .bench_local_refs(|atomic_waker| {
-            unsafe { atomic_waker.register(&waker2) };
+            atomic_waker.register(&waker2);
         });
 }
 
-#[divan::bench(types = [SpmcWaker<Synchronized, false>, SpmcWaker<Synchronized, true>, SpmcWaker<Sequential, false>, SpmcWaker<Sequential, true>, SpmcWaker<Unsynchronized, false>, SpmcWaker<Unsynchronized, true>, futures::task::AtomicWaker, DiatomicWaker])]
+#[divan::bench(types = [SpmcWaker<Synchronized, false, Strict>, SpmcWaker<Synchronized, true, Strict>, SpmcWaker<Sequential, false, Strict>, SpmcWaker<Sequential, true, Strict>, SpmcWaker<Unsynchronized, false, Strict>, SpmcWaker<Unsynchronized, true, Strict>, SpmcWaker<Synchronized, false, Unchecked>, SpmcWaker<Synchronized, true, Unchecked>, SpmcWaker<Sequential, false, Unchecked>, SpmcWaker<Sequential, true, Unchecked>, SpmcWaker<Unsynchronized, false, Unchecked>, SpmcWaker<Unsynchronized, true, Unchecked>, futures::task::AtomicWaker, DiatomicWaker])]
 fn wake<W: AtomicWaker>(bencher: Bencher) {
     let waker = fake_waker();
     bencher
         .with_inputs(|| {
             let atomic_waker = W::default();
-            unsafe { atomic_waker.register(&waker) };
+            atomic_waker.register(&waker);
             atomic_waker
         })
         .bench_local_refs(|atomic_waker| atomic_waker.wake());
 }
 
-#[divan::bench(types = [SpmcWaker<Synchronized, false>, SpmcWaker<Synchronized, true>, SpmcWaker<Sequential, false>, SpmcWaker<Sequential, true>, SpmcWaker<Unsynchronized, false>, SpmcWaker<Unsynchronized, true>, futures::task::AtomicWaker, DiatomicWaker])]
+#[divan::bench(types = [SpmcWaker<Synchronized, false, Strict>, SpmcWaker<Synchronized, true, Strict>, SpmcWaker<Sequential, false, Strict>, SpmcWaker<Sequential, true, Strict>, SpmcWaker<Unsynchronized, false, Strict>, SpmcWaker<Unsynchronized, true, Strict>, SpmcWaker<Synchronized, false, Unchecked>, SpmcWaker<Synchronized, true, Unchecked>, SpmcWaker<Sequential, false, Unchecked>, SpmcWaker<Sequential, true, Unchecked>, SpmcWaker<Unsynchronized, false, Unchecked>, SpmcWaker<Unsynchronized, true, Unchecked>, futures::task::AtomicWaker, DiatomicWaker])]
 fn wake_cold<W: AtomicWaker>(bencher: Bencher) {
     let waker = fake_waker();
     bencher
         .with_inputs(|| {
             let atomic_waker = W::default();
-            unsafe { atomic_waker.register(&waker) };
+            atomic_waker.register(&waker);
             atomic_waker
         })
         .bench_local_refs(|atomic_waker| atomic_waker.wake_cold());
 }
 
-#[divan::bench(types = [SpmcWaker<Synchronized, false>, SpmcWaker<Synchronized, true>, SpmcWaker<Sequential, false>, SpmcWaker<Sequential, true>, SpmcWaker<Unsynchronized, false>, SpmcWaker<Unsynchronized, true>, futures::task::AtomicWaker, DiatomicWaker], threads = [1, 2, 4])]
+#[divan::bench(types = [SpmcWaker<Synchronized, false, Strict>, SpmcWaker<Synchronized, true, Strict>, SpmcWaker<Sequential, false, Strict>, SpmcWaker<Sequential, true, Strict>, SpmcWaker<Unsynchronized, false, Strict>, SpmcWaker<Unsynchronized, true, Strict>, SpmcWaker<Synchronized, false, Unchecked>, SpmcWaker<Synchronized, true, Unchecked>, SpmcWaker<Sequential, false, Unchecked>, SpmcWaker<Sequential, true, Unchecked>, SpmcWaker<Unsynchronized, false, Unchecked>, SpmcWaker<Unsynchronized, true, Unchecked>, futures::task::AtomicWaker, DiatomicWaker], threads = [1, 2, 4])]
 fn wake_cold_empty<W: AtomicWaker>(bencher: Bencher) {
     let atomic_waker = W::default();
     bencher.bench(|| black_box(&atomic_waker).wake_cold());

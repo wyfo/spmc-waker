@@ -1,181 +1,257 @@
-#[cfg(not(loom))]
-pub(crate) use core::*;
+//! Overwrite of `loom` atomics to emulate `SeqCst` support.
+//!
+//! `SpmcWaker<Sequential>` uses the pattern `store X; load Y || store Y; load X` with `SeqCst`
+//! operations. This pattern also works by inserting a `SeqCst` fence between stores and loads.
+//! This is done by tracking stores in a thread-local bool, so a fence can correctly be inserted
+//! before the next load.
+//!
+//! Moreover, this module adds tracing to atomic operations: setting `LOOM_TRACE` environment
+//! variable makes all atomic operations printed into `loom.trace` file.
+//!
+//! Last but not least, it allows downgrading an atomic operation ordering (or to remove a fence)
+//! by setting the `LOOM_DOWNGRADE` environment variable; see [`Downgrade`] for the format. It
+//! makes it possible to check if the atomic orderings are correctly chosen to be minimal.
+extern crate std;
 
-#[cfg(loom)]
-pub(crate) use loom::*;
+use core::{cell::Cell, panic::Location, sync::atomic::Ordering};
+use std::{
+    fs::{File, OpenOptions},
+    io::{Seek, Write},
+    sync::LazyLock,
+};
 
-pub(crate) mod sync {
-    pub(crate) mod atomic {
-        #[cfg(all(not(loom), not(feature = "portable-atomic")))]
-        pub(crate) use core::sync::atomic::*;
+const TRACE_PATH: &str = "loom.trace";
+const TRACE_VAR: &str = "LOOM_TRACE";
+const DOWNGRADE_VAR: &str = "LOOM_DOWNGRADE";
 
-        #[cfg(loom)]
-        pub(crate) use loom::sync::atomic::*;
-        #[cfg(all(not(loom), feature = "portable-atomic"))]
-        pub(crate) use portable_atomic::*;
+// ========== SeqCst emulation ==========
 
-        #[cfg(loom)]
-        use crate::loom::loom_trace;
+loom::thread_local! {
+    static PENDING_SEQCST_STORE: Cell<bool> = Cell::new(false);
+}
 
-        #[cfg(loom)]
-        fn seqcst_fence(order: Ordering) {
-            if order == loom::sync::atomic::Ordering::SeqCst {
-                loom::sync::atomic::fence(order);
-            }
-        }
-
-        #[cfg(loom)]
-        #[derive(Debug)]
-        pub(crate) struct AtomicPtr<T> {
-            atomic: loom::sync::atomic::AtomicUsize,
-            _phantom: core::marker::PhantomData<*mut T>,
-        }
-
-        #[cfg(loom)]
-        impl<T> AtomicPtr<T> {
-            pub(crate) fn new(x: *mut T) -> Self {
-                Self {
-                    atomic: loom::sync::atomic::AtomicUsize::new(x.expose_provenance()),
-                    _phantom: core::marker::PhantomData,
-                }
-            }
-
-            #[track_caller]
-            pub(crate) fn load(&self, order: Ordering) -> *mut T {
-                seqcst_fence(order);
-                let res: *mut T = core::ptr::with_exposed_provenance_mut(self.atomic.load(order));
-                loom_trace!("load({order:?}) -> {res:p}");
-                res
-            }
-
-            #[track_caller]
-            pub(in crate::loom) fn load_mut(&mut self) -> *mut T {
-                let res: *mut T =
-                    core::ptr::with_exposed_provenance_mut(self.atomic.with_mut(|x| *x));
-                loom_trace!("load_mut() -> {res:p}");
-                res
-            }
-
-            #[track_caller]
-            pub(crate) fn store(&self, x: *mut T, order: Ordering) {
-                self.atomic.store(x.expose_provenance(), order);
-                seqcst_fence(order);
-                loom_trace!("store({x:p}, {order:?})");
-            }
-
-            #[track_caller]
-            pub(crate) fn swap(&self, x: *mut T, order: Ordering) -> *mut T {
-                seqcst_fence(order);
-                let res = self.atomic.swap(x.expose_provenance(), order);
-                seqcst_fence(order);
-                let res: *mut T = core::ptr::with_exposed_provenance_mut(res);
-                loom_trace!("swap({x:p}, {order:?}) -> {res:p}");
-                res
-            }
-
-            #[track_caller]
-            pub(crate) fn compare_exchange(
-                &self,
-                current: *mut T,
-                new: *mut T,
-                success: Ordering,
-                failure: Ordering,
-            ) -> Result<*mut T, *mut T> {
-                seqcst_fence(success);
-                let res = self.atomic.compare_exchange(
-                    current.expose_provenance(),
-                    new.expose_provenance(),
-                    success,
-                    failure,
-                );
-                if res.is_ok() {
-                    seqcst_fence(success);
-                }
-                let res = res
-                    .map(core::ptr::with_exposed_provenance_mut::<T>)
-                    .map_err(core::ptr::with_exposed_provenance_mut::<T>);
-                loom_trace!(
-                    "compare_exchange(cur={current:p}, new={new:p}, {success:?}/{failure:?}) -> {res:?}"
-                );
-                res
-            }
-
-            #[track_caller]
-            pub(crate) fn fetch_byte_add(&self, val: usize, order: Ordering) -> *mut T {
-                seqcst_fence(order);
-                let res = self.atomic.fetch_add(val, order);
-                seqcst_fence(order);
-                let res: *mut T = core::ptr::with_exposed_provenance_mut(res);
-                loom_trace!("fetch_byte_add({val:#x}, {order:?}) -> {res:p}");
-                res
-            }
-        }
+fn mark_store(order: Ordering) {
+    if order == Ordering::SeqCst {
+        PENDING_SEQCST_STORE.with(|s| s.set(true));
     }
 }
 
-pub(crate) trait AtomicPtrExt<T> {
-    fn load_mut(&mut self) -> *mut T;
-}
-
-impl<T> AtomicPtrExt<T> for sync::atomic::AtomicPtr<T> {
-    #[cfg_attr(loom, track_caller)]
-    fn load_mut(&mut self) -> *mut T {
-        #[cfg(not(loom))]
-        return *self.get_mut();
-        #[cfg(loom)]
-        return self.load_mut();
+fn fence_before_load(order: Ordering) {
+    if order == Ordering::SeqCst && PENDING_SEQCST_STORE.with(|s| s.replace(false)) {
+        loom::sync::atomic::fence(Ordering::SeqCst);
     }
 }
 
-#[cfg(loom)]
-pub(crate) mod trace {
-    extern crate std;
-    use std::{
-        fs::{File, OpenOptions},
-        sync::LazyLock,
-    };
+// ========== Tracing ==========
 
-    const PATH: &str = "loom.trace";
+static TRACE_FILE: LazyLock<Option<File>> = LazyLock::new(|| {
+    std::env::var_os(TRACE_VAR)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(TRACE_PATH)
+        .unwrap();
+    Some(file)
+});
 
-    /// Tracing is enabled at runtime by setting the `LOOM_TRACE` env var.
-    pub(crate) static ENABLED: LazyLock<bool> =
-        LazyLock::new(|| std::env::var_os("LOOM_TRACE").is_some());
+/// Write a string to the trace file.
+#[track_caller]
+pub fn write_trace<S: AsRef<str>>(s: impl FnOnce(&Location) -> S) {
+    if let Some(mut file) = TRACE_FILE.as_ref() {
+        file.write_all(s(Location::caller()).as_ref().as_bytes())
+            .unwrap();
+    }
+}
 
-    pub(crate) static FILE: LazyLock<File> = LazyLock::new(|| {
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(PATH)
-            .unwrap()
-    });
+/// Clears loom trace file.
+///
+/// It should be called at the beginning of each model iteration.
+pub fn clear_trace() {
+    if let Some(mut file) = TRACE_FILE.as_ref() {
+        file.set_len(0).unwrap();
+        file.rewind().unwrap();
+    }
+}
 
-    /// Clears loom trace file.
-    pub fn clear() {
-        if *ENABLED {
-            FILE.set_len(0).unwrap();
+// ========== Ordering downgrade ==========
+
+/// A single ordering downgrade (or fence removal) selected at runtime via the
+/// `LOOM_DOWNGRADE` env var. Format: `"<line>:<from>:<to>"` for an ordering
+/// (e.g.`"384:SeqCst:Release"`), or `"<line>:fence"` to drop a fence.
+enum Downgrade {
+    Ordering { from: Ordering, to: Ordering },
+    Fence,
+}
+
+static DOWNGRADE: LazyLock<Option<(u32, Downgrade)>> = LazyLock::new(|| {
+    fn parse_ordering(s: &str) -> Ordering {
+        match s {
+            "Relaxed" => Ordering::Relaxed,
+            "Acquire" => Ordering::Acquire,
+            "Release" => Ordering::Release,
+            "AcqRel" => Ordering::AcqRel,
+            "SeqCst" => Ordering::SeqCst,
+            _ => panic!("invalid ordering in LOOM_DOWNGRADE: {s:?}"),
         }
     }
+    let var = std::env::var_os(DOWNGRADE_VAR)?.into_string().unwrap();
+    let parts = var.split(':').collect::<std::vec::Vec<_>>();
+    Some(match parts.as_slice() {
+        [line, from, to] => (
+            line.parse().unwrap(),
+            Downgrade::Ordering {
+                from: parse_ordering(from),
+                to: parse_ordering(to),
+            },
+        ),
+        [line, "fence"] => (line.parse().unwrap(), Downgrade::Fence),
+        _ => panic!("invalid {DOWNGRADE_VAR}: {parts:?}"),
+    })
+});
+
+#[track_caller]
+fn handle_downgrade(order: Ordering) -> Ordering {
+    if let Some(&(line, Downgrade::Ordering { from, to })) = DOWNGRADE.as_ref()
+        && from == order
+        && Location::caller().line() == line
+    {
+        return to;
+    }
+    order
 }
 
-#[cfg(loom)]
+// ========== Atomics wrapping ==========
+
+#[track_caller]
+pub fn fence(order: Ordering) {
+    if let Some(&(line, Downgrade::Fence)) = DOWNGRADE.as_ref()
+        && Location::caller().line() == line
+    {
+        return;
+    }
+    loom::sync::atomic::fence(order);
+    loom_trace!("fence({order:?})");
+}
+
+#[derive(Debug, Default)]
+pub struct AtomicUsize(loom::sync::atomic::AtomicUsize);
+
+impl AtomicUsize {
+    pub fn new(x: usize) -> Self {
+        Self(loom::sync::atomic::AtomicUsize::new(x))
+    }
+
+    #[track_caller]
+    pub fn load(&self, order: Ordering) -> usize {
+        let order = handle_downgrade(order);
+        fence_before_load(order);
+        let res: usize = self.0.load(order);
+        loom_trace!("load({order:?}) -> {res}");
+        res
+    }
+
+    #[track_caller]
+    pub fn store(&self, x: usize, order: Ordering) {
+        let order = handle_downgrade(order);
+        self.0.store(x, order);
+        mark_store(order);
+        loom_trace!("store({x}, {order:?})");
+    }
+
+    #[track_caller]
+    pub fn swap(&self, x: usize, order: Ordering) -> usize {
+        let order = handle_downgrade(order);
+        // An RMW is a load then a store: fence for the load part, record the
+        // store part for the next load.
+        fence_before_load(order);
+        let res = self.0.swap(x, order);
+        mark_store(order);
+        loom_trace!("swap({x}, {order:?}) -> {res}");
+        res
+    }
+
+    #[track_caller]
+    pub fn compare_exchange(
+        &self,
+        current: usize,
+        new: usize,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<usize, usize> {
+        let (success, failure) = (handle_downgrade(success), handle_downgrade(failure));
+        fence_before_load(success);
+        let res = self.0.compare_exchange(current, new, success, failure);
+        // The store only happens on success, so only then is a store pending.
+        if res.is_ok() {
+            mark_store(success);
+        }
+        loom_trace!(
+            "compare_exchange(cur={current}, new={new}, {success:?}/{failure:?}) -> {res:?}"
+        );
+        res
+    }
+
+    #[track_caller]
+    pub fn compare_exchange_weak(
+        &self,
+        current: usize,
+        new: usize,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<usize, usize> {
+        self.compare_exchange(current, new, success, failure)
+    }
+
+    #[track_caller]
+    pub fn fetch_add(&self, val: usize, order: Ordering) -> usize {
+        let order = handle_downgrade(order);
+        fence_before_load(order);
+        let res = self.0.fetch_add(val, order);
+        mark_store(order);
+        loom_trace!("fetch_add({val}, {order:?}) -> {res}");
+        res
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct AtomicPtr<T>(loom::sync::atomic::AtomicPtr<T>);
+
+impl<T> AtomicPtr<T> {
+    pub fn new(x: *mut T) -> Self {
+        Self(loom::sync::atomic::AtomicPtr::new(x))
+    }
+
+    #[track_caller]
+    pub fn load(&self, order: Ordering) -> *mut T {
+        let order = handle_downgrade(order);
+        fence_before_load(order);
+        let res = self.0.load(order);
+        loom_trace!("load({order:?}) -> {res:?}");
+        res
+    }
+
+    #[track_caller]
+    pub fn store(&self, x: *mut T, order: Ordering) {
+        let order = handle_downgrade(order);
+        self.0.store(x, order);
+        mark_store(order);
+        loom_trace!("store({x:?}, {order:?})");
+    }
+}
+
+// ========== Macro ==========
+
+#[doc(hidden)]
+#[macro_export]
 macro_rules! loom_trace {
-    ($($t:tt)*) => {
-        if *crate::loom::trace::ENABLED {
-            extern crate std;
-            use std::io::Write;
-            // Format the whole line first and append it with a single
-            // `write_all`: `O_APPEND` makes one small write atomic, so
-            // concurrent threads' lines don't tear (no lock needed).
-            let line = std::format!(
-                "[{:?}] {}: {}\n",
-                loom::thread::current().id(),
-                core::panic::Location::caller(),
-                format_args!($($t)*),
-            );
-            let _ = (&*crate::loom::trace::FILE).write_all(line.as_bytes());
-        }
-    };
+    ($($t:tt)*) => {{
+        extern crate std;
+        $crate::loom::write_trace(|loc| {
+            let thread_id = ::loom::thread::current().id();
+            let args = format_args!($($t)*);
+            std::format!("[{thread_id:?}] {loc}: {args}\n",)
+        });
+    }};
 }
-
-#[cfg(loom)]
-pub(crate) use loom_trace;
+use loom_trace;

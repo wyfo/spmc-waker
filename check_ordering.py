@@ -1,20 +1,41 @@
 #!/usr/bin/env python3
 """
-For each non-Relaxed memory ordering (and each fence) in src/lib.rs,
-mutate it one step weaker and run loom tests expecting a failure.
+For each non-Relaxed memory ordering (and each fence) in src/lib.rs, weaken it
+one step and run loom tests expecting a failure — a downgrade that no test
+catches may be unnecessary.
+
+The ordering is weakened at *runtime*, not by editing the source: `src/loom.rs`
+reads a `LOOM_DOWNGRADE="<line>:<from>:<to>"` (or `"<line>:fence"`) env var and,
+via `#[track_caller]`, substitutes/skips the ordering at the matching call site.
+So the test binary is built ONCE and every downgrade is just another run of it —
+no per-downgrade recompilation.
 
 Usage: python check_ordering.py
 """
+import json
 import os
 import re
 import subprocess
 import sys
 
 FILE = "src/lib.rs"
-TEST_CMD = ["cargo", "test", "--release"]
-BASE_ENV = {**os.environ, "RUSTFLAGS": "--cfg=loom"}
-# Try the cheap preemption bound first; escalate only if the mutant still passes.
-PREEMPTIONS = [1, 3]
+BASE_ENV = {**os.environ, "RUSTFLAGS": "--cfg=loom -C debug_assertions"}
+# Build the loom integration test once; skip the doctests.
+BUILD_CMD = [
+    "cargo", "test", "--release", "--test", "spmc_waker",
+    "--no-run", "--message-format=json",
+]
+# Try the cheap preemption bound first; escalate only if the downgrade still passes.
+PREEMPTIONS = [1, 2]
+# `no_missed_wakeup` alone now catches every downgrade, so run only it: the rest of the
+# suite (notably `basic_notification`, a broad, slow test imported verbatim from
+# tokio) is redundant for this check and much slower. Naming the test to run
+# rather than skipping the slow ones means a rename of `no_missed_wakeup` would silently
+# run nothing — but that fails loud here, as *every* ordering reported "may be
+# unnecessary", rather than as a quiet coverage gap. Positional filters are
+# substring-matched against the full test name, so `no_missed_wakeup` selects every
+# `no_missed_wakeup::case_*` rstest instantiation.
+TEST_FILTERS = ["no_missed_wakeup"]
 
 DOWNGRADE = {
     "SeqCst": ["AcqRel", "Acquire", "Release"],
@@ -24,17 +45,24 @@ DOWNGRADE = {
 }
 ORDERING_RE = re.compile(r"\b(SeqCst|AcqRel|Acquire|Release)\b")
 FENCE_RE = re.compile(r"^(\s*)fence\(")
+# Opens an atomic call whose ordering `#[track_caller]` attributes to this line.
+ATOMIC_CALL_RE = re.compile(
+    r"\.(?:load|store|swap|fetch_add|compare_exchange_weak|compare_exchange)\s*\("
+    r"|\bfence\s*\("
+)
+# A per-test result line, e.g. `test foo::bar ... FAILED`. Excludes the
+# `test result: FAILED.` summary line (no ` ... FAILED`).
+FAILED_LINE_RE = re.compile(r"^test (.+) \.\.\. FAILED\s*$")
 
 
-def find_mutations(lines):
-    """Yield (line_idx, start, end, old, new) for each mutation to test."""
+def find_downgrades(lines):
+    """Yield (line_idx, start, end, old, new) for each downgrade to test."""
     for i, line in enumerate(lines):
         stripped = line.lstrip()
         if stripped.startswith("//") or "!ORDERING" in line:
             continue
         if FENCE_RE.match(line):
-            # Remove the fence statement by commenting it out
-            yield i, None, None, line, FENCE_RE.sub(r"\1// fence(", line, count=1)
+            yield i, None, None, line, None
             continue
         for m in ORDERING_RE.finditer(line):
             old = m.group(1)
@@ -42,70 +70,122 @@ def find_mutations(lines):
                 yield i, m.start(), m.end(), old, new
 
 
-def apply(lines, line_idx, start, end, new):
-    mutant = lines.copy()
+def call_line(lines, line_idx):
+    """The 1-based source line `#[track_caller]` reports for the atomic call: the
+    nearest line at or above the ordering that opens an atomic call. This lets
+    the ordering sit on a later line than the call — alone (`    Acquire`) or in
+    a match/if arm (`SyncMode::Sequential => SeqCst,`) — while inline calls
+    resolve to their own line. (It assumes no *other* atomic call is nested in
+    the same multiline argument list, which never happens here.)"""
+    for j in range(line_idx, -1, -1):
+        if ATOMIC_CALL_RE.search(lines[j]):
+            return j + 1
+    return line_idx + 1
+
+
+def downgrade_arg(lines, downgrade):
+    """The `LOOM_DOWNGRADE` value that selects this downgrade at runtime."""
+    line_idx, start, end, old, new = downgrade
+    line = call_line(lines, line_idx)
     if start is None:
-        mutant[line_idx] = new
-    else:
-        line = lines[line_idx]
-        mutant[line_idx] = line[:start] + new + line[end:]
-    return mutant
+        return f"{line}:fence"
+    return f"{line}:{old}:{new}"
 
 
-def run_loom(preemptions):
-    env = {**BASE_ENV, "LOOM_MAX_PREEMPTIONS": str(preemptions)}
-    proc = subprocess.Popen(
-        TEST_CMD, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+def describe(lines, downgrade):
+    line_idx, start, end, old, new = downgrade
+    where = call_line(lines, line_idx)
+    at = "" if where == line_idx + 1 else f" call@{where}"
+    if start is None:
+        return f"line {line_idx + 1}: remove fence{at}"
+    return f"line {line_idx + 1}: {old} → {new}{at}"
+
+
+def build_binary():
+    """Compile the loom test binary once and return its path."""
+    proc = subprocess.run(
+        BUILD_CMD, env=BASE_ENV, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
-    for line in proc.stdout:
-        if "FAILED" in line:
-            proc.kill()
-            proc.wait()
-            return True
-    proc.wait()
-    return proc.returncode != 0
+    exe = None
+    for line in proc.stdout.splitlines():
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        target = msg.get("target", {})
+        if (
+            msg.get("reason") == "compiler-artifact"
+            and msg.get("executable")
+            and target.get("name") == "spmc_waker"
+            and "test" in target.get("kind", [])
+        ):
+            exe = msg["executable"]
+    if exe is None:
+        sys.exit("failed to build the loom test binary:\n" + proc.stderr)
+    return exe
 
 
-def detect_failure():
-    """Return the preemption bound at which the mutant fails, or None if it
-    passes even at the highest bound."""
+def run_tests(binary, downgrade):
+    """Run the suite with the downgrade applied, escalating the preemption bound.
+    Return (test, preemptions) for the first test that catches it, or None if it
+    cleanly passes at every bound (the ordering may be unnecessary). Aborts the
+    whole run if the binary neither passes cleanly nor names a failing test."""
     for p in PREEMPTIONS:
-        if run_loom(p):
-            return p
+        env = {**os.environ, "LOOM_MAX_PREEMPTIONS": str(p), "LOOM_DOWNGRADE": downgrade}
+        proc = subprocess.Popen(
+            [binary, *TEST_FILTERS], env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+        clean = False
+        for line in proc.stdout:
+            m = FAILED_LINE_RE.match(line)
+            if m:
+                proc.kill()
+                proc.wait()
+                return m.group(1), p
+            if line.startswith("test result: ok"):
+                clean = True
+        proc.wait()
+        # Panics from a downgraded ordering are caught and reported as a named
+        # `... FAILED`, so the only expected outcomes are a FAILED line or a clean
+        # pass. Anything else (a nonzero exit with no result, e.g. a stack
+        # overflow from a divergent loom execution) is a real problem, not a
+        # "catch": abort rather than silently reading it as coverage.
+        if proc.returncode != 0 or not clean:
+            sys.exit(
+                f"test binary crashed for downgrade {downgrade!r} at "
+                f"LOOM_MAX_PREEMPTIONS={p} (exit {proc.returncode})"
+            )
+        # Cleanly passed; try a higher preemption bound before giving up.
     return None
 
 
 def main():
-    with open(FILE) as f:
-        original = f.read()
-    lines = original.splitlines(keepends=True)
+    with open(FILE, newline="") as f:
+        lines = f.read().splitlines(keepends=True)
 
-    mutations = list(find_mutations(lines))
-    n_orderings = len({(li, s, e, o) for li, s, e, o, _ in mutations})
-    print(f"Found {n_orderings} orderings ({len(mutations)} mutations) to test\n")
+    downgrades = list(find_downgrades(lines))
+    args = [downgrade_arg(lines, dg) for dg in downgrades]
+    dupes = {a for a in args if args.count(a) > 1}
+    if dupes:
+        sys.exit(f"ambiguous LOOM_DOWNGRADE value(s) (same call line, from, to): {dupes}")
+    n_orderings = len({(li, s, e, o) for li, s, e, o, _ in downgrades})
+
+    print("Building the loom test binary ... ", end="", flush=True)
+    binary = build_binary()
+    print("done")
+
+    print(f"Found {n_orderings} orderings ({len(downgrades)} downgrades) to test\n")
 
     unnecessary = []
-    try:
-        for idx, (line_idx, start, end, old, new) in enumerate(mutations, 1):
-            if start is None:
-                desc = f"line {line_idx + 1}: remove fence"
-            else:
-                desc = f"line {line_idx + 1}: {old} → {new}"
-
-            print(f"[{idx}/{len(mutations)}] {desc} ... ", end="", flush=True)
-
-            with open(FILE, "w") as f:
-                f.writelines(apply(lines, line_idx, start, end, new))
-
-            p = detect_failure()
-            if p is not None:
-                print(f"FAIL ✓ (preemptions={p})")
-            else:
-                print("PASS ✗  <-- ordering may be unnecessary!")
-                unnecessary.append(desc)
-    finally:
-        with open(FILE, "w") as f:
-            f.write(original)
+    for idx, (downgrade, arg) in enumerate(zip(downgrades, args), 1):
+        print(f"[{idx}/{len(downgrades)}] {describe(lines, downgrade)} ... ", end="", flush=True)
+        if result := run_tests(binary, arg):
+            test, p = result
+            print(f"FAIL ✓ ({test=}, {p=})")
+        else:
+            print("PASS ✗  <-- ordering may be unnecessary!")
+            unnecessary.append(describe(lines, downgrade))
 
     print(f"\n{'=' * 50}")
     if unnecessary:
