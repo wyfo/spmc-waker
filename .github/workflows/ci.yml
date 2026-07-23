@@ -30,6 +30,21 @@ jobs:
         env:
           RUSTDOCFLAGS: "-Dwarnings"
 
+  asm:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: update toolchain
+        run: rustup update stable && rustup default stable
+      - name: add aarch64 target
+        run: rustup target add aarch64-unknown-linux-gnu
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-show-asm
+      - name: check asm
+        run: asm/check-asm.sh --check
+
   loom:
     needs: test
     runs-on: ubuntu-latest
