@@ -29,7 +29,7 @@ asm_register_asm:
 	mov x2, x20
 	ldp x20, x19, [sp, #16]
 	ldp x29, x30, [sp], #32
-	b spmc_waker::SpmcWaker<S,_,R>::register_impl_cold
+	b <spmc_waker::SpmcWaker>::register_impl_cold
 .LBB3_7:
 	adrp x0, .Lanon.40943f74b53f8fa4249390633cadaabd.0
 	add x0, x0, :lo12:.Lanon.40943f74b53f8fa4249390633cadaabd.0

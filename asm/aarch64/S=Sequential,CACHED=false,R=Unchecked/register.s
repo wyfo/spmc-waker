@@ -19,4 +19,4 @@ asm_register_asm:
 	mov x0, x19
 	ldp x20, x19, [sp, #16]
 	ldp x29, x30, [sp], #32
-	b spmc_waker::SpmcWaker<S,_,R>::register_impl_cold
+	b <spmc_waker::SpmcWaker<spmc_waker::synchronization::Sequential, false, spmc_waker::registration::Unchecked>>::register_impl_cold

@@ -465,36 +465,28 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> SpmcWaker<S
         // overwrite this one; it must be unregistered first, using a swap to catch if it has
         // already been unregistered (or cached).
         } else {
-            let new_state = state.unset(REGISTERED);
+            let mut new_state = state.unset(REGISTERED);
+            // If caching is enabled, the waking thread may have unregistered the waker before the
+            // swap, but it would then concurrently try to cache the waker. This is prevented by
+            // also incrementing the registration count, so the waking thread's CAS will fail in any
+            // case.
+            if CACHING {
+                new_state = new_state.wrapping_add(REGISTRATION_INCR);
+            }
             // Relaxed ordering is fine to set the state to unregistered. A concurrent `wake` may
             // load a stale REGISTERED, but its CAS would fail right after.
             let old_state = self.state.swap(new_state, Relaxed);
             debug_assert!(old_state & !FLAGS_MASK == state & !FLAGS_MASK);
-            // If the old waker is still registered, it is dropped. It must be dropped before
-            // cloning the new waker, as clone may panic and the old waker would then be leaked.
-            if old_state.has(REGISTERED) {
-                drop(old_waker.confirm(old_state));
-            // If the waker has been cached after a concurrent `wake`, it is dropped after an
-            // Acquire fence to ensure `wake_by_ref` happens before the drop.
-            } else if CACHING && old_state.has(CACHED) {
-                fence(Acquire);
-                drop(old_waker.confirm(old_state));
-            // Otherwise, if waker ownership has been acquired but there is still a chance that it
-            // might be concurrently cached, it must be cached first using a CAS. Registering the
-            // new waker with a swap (as done above) is tempting, but as explained before, dropping
-            // the old waker must be done before cloning the new one.
-            } else if CACHING {
-                debug_assert!(!old_state.has(FLAGS_MASK));
-                let cached = old_state.set(CACHED);
-                // If the CAS succeeds, then `wake` CAS will fail and the waker will be dropped
-                // subsequently. Otherwise, waker was already cached and the ownership has been
-                // given back, so it must be dropped here.
-                if let Err(old_state) =
-                    (self.state).compare_exchange(old_state, cached, Relaxed, Acquire)
-                {
-                    debug_assert_eq!(old_state, cached);
-                    drop(old_waker.confirm(cached));
+            // If the old waker is still registered (or cached), it is dropped. It is better to
+            // drop it before cloning the new waker, as clone may panic and the old waker would
+            // then be leaked (or risk a double panic if we try to drop it).
+            if old_state.has(REGISTERED) || (CACHING && old_state.has(CACHED)) {
+                // An Acquire fence must be emitted if the old waker is cached, to ensure
+                // `wake_by_ref` happens before drop.
+                if CACHING && old_state.has(CACHED) {
+                    fence(Acquire);
                 }
+                drop(old_waker.confirm(old_state));
             } else {
                 debug_assert!(!old_state.has(FLAGS_MASK));
             }
@@ -611,7 +603,7 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> SpmcWaker<S
     #[inline(always)]
     fn wake_impl(&self, state: State, released: S::Released) {
         if let Some((waker, state)) = self.take_impl(state, released) {
-            // If CACHING is enabled, use `Waker::wake_by_ref` and try to update the state back
+            // If caching is enabled, use `Waker::wake_by_ref` and try to update the state back
             // with the CACHED state, giving back the ownership of the waker. If it fails, drop it.
             if CACHING {
                 waker.wake_by_ref();

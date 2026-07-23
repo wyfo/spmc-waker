@@ -26,7 +26,7 @@ asm_register_asm:
 	ret
 .LBB3_7:
 	ldp x29, x30, [sp], #16
-	b spmc_waker::SpmcWaker<S,_,R>::register_impl_cold
+	b <spmc_waker::SpmcWaker<spmc_waker::synchronization::Synchronized, true>>::register_impl_cold
 .LBB3_8:
 	adrp x0, .Lanon.40943f74b53f8fa4249390633cadaabd.0
 	add x0, x0, :lo12:.Lanon.40943f74b53f8fa4249390633cadaabd.0

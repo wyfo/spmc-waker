@@ -40,7 +40,7 @@ asm_poll_wait_until_asm:
 	ret
 .LBB1_7:
 	mov x0, x19
-	bl spmc_waker::SpmcWaker<S,_,R>::register_impl_cold
+	bl <spmc_waker::SpmcWaker<spmc_waker::synchronization::Unsynchronized, false, spmc_waker::registration::Unchecked>>::register_impl_cold
 	mov x21, x0
 	ldrb w8, [x20]
 	cbnz w8, .LBB1_4

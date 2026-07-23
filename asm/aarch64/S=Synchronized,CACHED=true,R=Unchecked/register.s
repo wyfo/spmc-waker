@@ -13,4 +13,4 @@ asm_register_asm:
 	swpa x8, x8, [x0]
 	ret
 .LBB3_4:
-	b spmc_waker::SpmcWaker<S,_,R>::register_impl_cold
+	b <spmc_waker::SpmcWaker<spmc_waker::synchronization::Synchronized, true, spmc_waker::registration::Unchecked>>::register_impl_cold

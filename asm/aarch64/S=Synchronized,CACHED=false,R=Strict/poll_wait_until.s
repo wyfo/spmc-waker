@@ -55,7 +55,7 @@ asm_poll_wait_until_asm:
 .LBB2_10:
 	mov x2, x19
 	str x0, [x29, #24]
-	bl spmc_waker::SpmcWaker<S,_,R>::register_impl_cold
+	bl <spmc_waker::SpmcWaker>::register_impl_cold
 	ldr x21, [x29, #24]
 	ldrb w8, [x20]
 	cbnz w8, .LBB2_8

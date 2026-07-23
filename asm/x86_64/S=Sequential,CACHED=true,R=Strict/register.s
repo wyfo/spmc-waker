@@ -11,18 +11,18 @@ asm_register_asm:
 	lock cmpxchg	qword ptr [rdi], rcx
 	jne .LBB3_1
 	test dl, 2
-	je spmc_waker::SpmcWaker<S,_,R>::register_impl_cold
+	je <spmc_waker::SpmcWaker<spmc_waker::synchronization::Sequential, true>>::register_impl_cold
 	mov rcx, qword ptr [rdi + 8]
 	mov rax, qword ptr [rdi + 16]
 	cmp rcx, qword ptr [rsi + 8]
-	jne spmc_waker::SpmcWaker<S,_,R>::register_impl_cold
+	jne <spmc_waker::SpmcWaker<spmc_waker::synchronization::Sequential, true>>::register_impl_cold
 	cmp rax, qword ptr [rsi]
 	jne .LBB3_6
 	add rdx, 7
 	xchg qword ptr [rdi], rdx
 	ret
 .LBB3_6:
-	jmp spmc_waker::SpmcWaker<S,_,R>::register_impl_cold
+	jmp <spmc_waker::SpmcWaker<spmc_waker::synchronization::Sequential, true>>::register_impl_cold
 .LBB3_7:
 	push rax
 	lea rdi, [rip + .Lanon.40943f74b53f8fa4249390633cadaabd.0]

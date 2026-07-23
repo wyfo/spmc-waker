@@ -1,4 +1,4 @@
-spmc_waker::SpmcWaker<S,_,R>::wake_impl_cold:
+<spmc_waker::SpmcWaker<spmc_waker::synchronization::Synchronized, false, spmc_waker::registration::Unchecked>>::wake_impl_cold:
 	mov rax, rsi
 	mov rcx, qword ptr [rdi + 8]
 	mov rsi, qword ptr [rdi + 16]

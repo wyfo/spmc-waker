@@ -1,4 +1,4 @@
-spmc_waker::SpmcWaker<S,_,R>::register_impl_cold:
+<spmc_waker::SpmcWaker<spmc_waker::synchronization::Sequential, false, spmc_waker::registration::Unchecked>>::register_impl_cold:
 	push r15
 	push r14
 	push r12
@@ -15,13 +15,13 @@ spmc_waker::SpmcWaker<S,_,R>::register_impl_cold:
 	mov rdx, rax
 	xor rdx, r12
 	or rdx, rcx
-	je .LBB0_4
+	je .LBB0_3
 	lea rcx, [rbx - 1]
 	xchg qword ptr [r14], rcx
 	test cl, 1
-	je .LBB0_3
+	je .LBB0_2
 	call qword ptr [rax + 24]
-.LBB0_3:
+.LBB0_2:
 	add rbx, 8
 	mov rdi, r15
 	call qword ptr [r12]
@@ -29,7 +29,7 @@ spmc_waker::SpmcWaker<S,_,R>::register_impl_cold:
 	mov qword ptr [r14 + 16], rax
 	mov rax, rbx
 	xchg qword ptr [r14], rax
-.LBB0_4:
+.LBB0_3:
 	mov rax, rbx
 	add rsp, 8
 	pop rbx

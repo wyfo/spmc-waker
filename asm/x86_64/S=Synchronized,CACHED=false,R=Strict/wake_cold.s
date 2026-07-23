@@ -13,4 +13,4 @@ asm_wake_cold_asm:
 	not al
 	movzx edx, al
 	and edx, 1
-	jmp spmc_waker::SpmcWaker<S,_,R>::wake_impl_cold
+	jmp <spmc_waker::SpmcWaker>::wake_impl_cold

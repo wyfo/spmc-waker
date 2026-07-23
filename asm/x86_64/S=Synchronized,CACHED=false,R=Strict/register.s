@@ -33,7 +33,7 @@ asm_register_asm:
 	add rsp, 8
 	pop rbx
 	pop r14
-	jmp spmc_waker::SpmcWaker<S,_,R>::register_impl_cold
+	jmp <spmc_waker::SpmcWaker>::register_impl_cold
 .LBB3_7:
 	lea rdi, [rip + .Lanon.40943f74b53f8fa4249390633cadaabd.0]
 	lea rdx, [rip + .Lanon.40943f74b53f8fa4249390633cadaabd.2]

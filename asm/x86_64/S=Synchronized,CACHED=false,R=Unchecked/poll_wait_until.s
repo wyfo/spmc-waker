@@ -42,7 +42,7 @@ asm_poll_wait_until_asm:
 .LBB2_7:
 	mov rdi, rbx
 	mov rdx, r15
-	call spmc_waker::SpmcWaker<S,_,R>::register_impl_cold
+	call <spmc_waker::SpmcWaker<spmc_waker::synchronization::Synchronized, false, spmc_waker::registration::Unchecked>>::register_impl_cold
 	mov r15, rax
 	movzx eax, byte ptr [r14]
 	test al, al

@@ -3,4 +3,4 @@ asm_wake_cold_asm:
 	tbnz w1, #0, .LBB7_2
 	ret
 .LBB7_2:
-	b spmc_waker::SpmcWaker<S,_,R>::wake_impl_cold
+	b <spmc_waker::SpmcWaker<spmc_waker::synchronization::Sequential, true, spmc_waker::registration::Unchecked>>::wake_impl_cold

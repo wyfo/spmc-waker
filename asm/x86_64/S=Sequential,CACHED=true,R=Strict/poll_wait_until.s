@@ -45,7 +45,7 @@ asm_poll_wait_until_asm:
 	mov rbx, rdi
 	mov r14, rdx
 	mov rdx, rcx
-	call spmc_waker::SpmcWaker<S,_,R>::register_impl_cold
+	call <spmc_waker::SpmcWaker<spmc_waker::synchronization::Sequential, true>>::register_impl_cold
 	mov rdx, r14
 	mov rdi, rbx
 	mov rcx, rax

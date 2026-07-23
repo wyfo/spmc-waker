@@ -1,4 +1,4 @@
-spmc_waker::SpmcWaker<S,_,R>::register_impl_cold:
+<spmc_waker::SpmcWaker>::register_impl_cold:
 	stp x29, x30, [sp, #-48]!
 	stp x22, x21, [sp, #16]
 	stp x20, x19, [sp, #32]

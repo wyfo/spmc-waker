@@ -1,4 +1,4 @@
-spmc_waker::SpmcWaker<S,_,R>::register_impl_cold:
+<spmc_waker::SpmcWaker<spmc_waker::synchronization::Sequential>>::register_impl_cold:
 	push r15
 	push r14
 	push r12

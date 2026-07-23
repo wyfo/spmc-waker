@@ -9,4 +9,4 @@ asm_wake_cold_asm:
 	mov w9, #1
 	dmb ishld
 	bic w2, w9, w8
-	b spmc_waker::SpmcWaker<S,_,R>::wake_impl_cold
+	b <spmc_waker::SpmcWaker>::wake_impl_cold

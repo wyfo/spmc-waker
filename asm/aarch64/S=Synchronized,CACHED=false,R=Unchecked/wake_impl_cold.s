@@ -1,4 +1,4 @@
-spmc_waker::SpmcWaker<S,_,R>::wake_impl_cold:
+<spmc_waker::SpmcWaker<spmc_waker::synchronization::Synchronized, false, spmc_waker::registration::Unchecked>>::wake_impl_cold:
 	sub x10, x1, #1
 	mov x11, x1
 	ldr x8, [x0, #8]

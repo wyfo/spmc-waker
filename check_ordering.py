@@ -25,8 +25,8 @@ BUILD_CMD = [
     "cargo", "test", "--release", "--test", "spmc_waker",
     "--no-run", "--message-format=json",
 ]
-# Try the cheap preemption bound first; escalate only if the downgrade still passes.
-PREEMPTIONS = [1, 2]
+# Every downgrade is caught at a single preemption, so no escalation is needed.
+MAX_PREEMPTIONS = 1
 # `no_missed_wakeup` alone now catches every downgrade, so run only it: the rest of the
 # suite (notably `basic_notification`, a broad, slow test imported verbatim from
 # tokio) is redundant for this check and much slower. Naming the test to run
@@ -126,37 +126,36 @@ def build_binary():
 
 
 def run_tests(binary, downgrade):
-    """Run the suite with the downgrade applied, escalating the preemption bound.
-    Return (test, preemptions) for the first test that catches it, or None if it
-    cleanly passes at every bound (the ordering may be unnecessary). Aborts the
-    whole run if the binary neither passes cleanly nor names a failing test."""
-    for p in PREEMPTIONS:
-        env = {**os.environ, "LOOM_MAX_PREEMPTIONS": str(p), "LOOM_DOWNGRADE": downgrade}
-        proc = subprocess.Popen(
-            [binary, *TEST_FILTERS], env=env,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-        )
-        clean = False
-        for line in proc.stdout:
-            m = FAILED_LINE_RE.match(line)
-            if m:
-                proc.kill()
-                proc.wait()
-                return m.group(1), p
-            if line.startswith("test result: ok"):
-                clean = True
-        proc.wait()
-        # Panics from a downgraded ordering are caught and reported as a named
-        # `... FAILED`, so the only expected outcomes are a FAILED line or a clean
-        # pass. Anything else (a nonzero exit with no result, e.g. a stack
-        # overflow from a divergent loom execution) is a real problem, not a
-        # "catch": abort rather than silently reading it as coverage.
-        if proc.returncode != 0 or not clean:
-            sys.exit(
-                f"test binary crashed for downgrade {downgrade!r} at "
-                f"LOOM_MAX_PREEMPTIONS={p} (exit {proc.returncode})"
-            )
-        # Cleanly passed; try a higher preemption bound before giving up.
+    """Run the suite once with the downgrade applied. Return the name of the first
+    test that catches it, or None if it passes cleanly (the ordering may be
+    unnecessary). Aborts the whole run if the binary neither passes cleanly nor
+    names a failing test."""
+    env = {
+        **os.environ,
+        "LOOM_MAX_PREEMPTIONS": str(MAX_PREEMPTIONS),
+        "LOOM_DOWNGRADE": downgrade,
+    }
+    proc = subprocess.Popen(
+        [binary, *TEST_FILTERS], env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+    clean = False
+    for line in proc.stdout:
+        m = FAILED_LINE_RE.match(line)
+        if m:
+            proc.kill()
+            proc.wait()
+            return m.group(1)
+        if line.startswith("test result: ok"):
+            clean = True
+    proc.wait()
+    # Panics from a downgraded ordering are caught and reported as a named
+    # `... FAILED`, so the only expected outcomes are a FAILED line or a clean
+    # pass. Anything else (a nonzero exit with no result, e.g. a stack overflow
+    # from a divergent loom execution) is a real problem, not a "catch": abort
+    # rather than silently reading it as coverage.
+    if proc.returncode != 0 or not clean:
+        sys.exit(f"test binary crashed for downgrade {downgrade!r} (exit {proc.returncode})")
     return None
 
 
@@ -180,16 +179,15 @@ def main():
     unnecessary = []
     for idx, (downgrade, arg) in enumerate(zip(downgrades, args), 1):
         print(f"[{idx}/{len(downgrades)}] {describe(lines, downgrade)} ... ", end="", flush=True)
-        if result := run_tests(binary, arg):
-            test, p = result
-            print(f"FAIL ✓ ({test=}, {p=})")
+        if test := run_tests(binary, arg):
+            print(f"FAIL ✓ ({test=})")
         else:
             print("PASS ✗  <-- ordering may be unnecessary!")
             unnecessary.append(describe(lines, downgrade))
 
     print(f"\n{'=' * 50}")
     if unnecessary:
-        print(f"WARNING: {len(unnecessary)} possibly unnecessary ordering(s):")
+        print(f"WARNING: {len(unnecessary)} possibly unnecessary ordering(s):"  )
         for d in unnecessary:
             print(f"  {d}")
         sys.exit(1)

@@ -5,4 +5,4 @@ asm_wake_cold_asm:
 	ret
 .LBB7_2:
 	#MEMBARRIER
-	jmp spmc_waker::SpmcWaker<S,_,R>::wake_impl_cold
+	jmp <spmc_waker::SpmcWaker<spmc_waker::synchronization::Unsynchronized, true, spmc_waker::registration::Unchecked>>::wake_impl_cold

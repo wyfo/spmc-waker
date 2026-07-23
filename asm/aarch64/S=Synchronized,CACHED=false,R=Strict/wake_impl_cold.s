@@ -1,4 +1,4 @@
-spmc_waker::SpmcWaker<S,_,R>::wake_impl_cold:
+<spmc_waker::SpmcWaker>::wake_impl_cold:
 	sub x10, x1, #1
 	mov x11, x1
 	ldr x8, [x0, #8]

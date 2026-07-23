@@ -1,4 +1,4 @@
-spmc_waker::SpmcWaker<S,_,R>::wake_impl_cold:
+<spmc_waker::SpmcWaker<spmc_waker::synchronization::Sequential, true>>::wake_impl_cold:
 	stp x29, x30, [sp, #-64]!
 	str x23, [sp, #16]
 	stp x22, x21, [sp, #32]

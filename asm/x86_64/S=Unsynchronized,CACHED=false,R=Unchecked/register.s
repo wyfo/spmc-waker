@@ -23,4 +23,4 @@ asm_register_asm:
 	add rsp, 8
 	pop rbx
 	pop r14
-	jmp spmc_waker::SpmcWaker<S,_,R>::register_impl_cold
+	jmp <spmc_waker::SpmcWaker<spmc_waker::synchronization::Unsynchronized, false, spmc_waker::registration::Unchecked>>::register_impl_cold

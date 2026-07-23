@@ -33,7 +33,7 @@ asm_poll_wait_until_asm:
 	mov x20, x2
 	mov x2, x8
 	mov x19, x0
-	bl spmc_waker::SpmcWaker<S,_,R>::register_impl_cold
+	bl <spmc_waker::SpmcWaker<spmc_waker::synchronization::Synchronized, true, spmc_waker::registration::Unchecked>>::register_impl_cold
 	mov x8, x0
 	mov x0, x19
 	ldrb w9, [x20]
