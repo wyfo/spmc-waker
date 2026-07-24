@@ -112,11 +112,13 @@ See [benchmark results](benches/README.md). The following table compares the ato
 
 |                         | `AtomicWaker`              | `SpmcWaker<Synchronized>` (default)           | `SpmcWaker<Sequential>`          | `SpmcWaker<Unsynchronized>`                   |
 |-------------------------|----------------------------|-----------------------------------------------|----------------------------------|-----------------------------------------------|
-| register                | RMW(Acquire) + RMW(AcqRel) | \[RMW(Relaxed)\] + RMW(AcqRel)                | \[RMW(Relaxed)\] + store(SeqCst) | \[RMW(Relaxed)\] + store(Release)             |
+| register                | RMW(Acquire) + RMW(AcqRel) | RMW(Relaxed)[^1] + RMW(AcqRel)                | RMW(Relaxed)[^1] + store(SeqCst) | RMW(Relaxed)[^1] + store(Release)             |
 | wake (waker registered) | RMW(AcqRel) + RMW(Release) | load(Relaxed) + fence(Acquire) + RMW(Release) | load(SeqCst) + RMW(Release)      | load(Relaxed) + fence(Acquire) + RMW(Release) |
-| wake (no waker)         | RMW(AcqRel) + RMW(Release) | load(Relaxed) + RMW(Release)                  | load(SeqCst)                     | load(Relaxed)                                 |
+| wake (no waker)         | RMW(AcqRel) + RMW(Release) | load(Relaxed) + RMW(Release)[^2]              | load(SeqCst)                     | load(Relaxed)                                 |
 
-*`[RMW(Relaxed)]` means that the RMW is only present for safe registration policies, i.e. `R=Strict`/`R=Lenient`; with `R=Unchecked` and unsafe `register`, it is replaced by `load(Relaxed)`.
+[^1]: the RMW is only present for safe registration policies, i.e. `R=Strict`/`R=Lenient`; with `R=Unchecked` and unsafe `register`, it is replaced by `load(Relaxed)`.
+
+[^2]: the RMW is a `fetch_add(0)`, which is equivalent **on x86** to a `SeqCst` fence; as a consequence (still on x86), it doesn't touch the `SpmcWaker` cache line, which stays read-only and uncontended.
 
 Compared to `AtomicWaker`, `SpmcWaker` reduces the number of RMW operations in all operations. `Sequential` and `Unsynchronized` variants go even further by reducing `wake` to single atomic load when no waker is registered.
 
