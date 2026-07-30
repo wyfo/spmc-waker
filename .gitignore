@@ -1,3 +1,6 @@
 **/target/
 **/Cargo.lock
 .idea
+.cargo/config.toml
+loom.trace
+loom_downgrade.sh

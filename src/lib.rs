@@ -28,9 +28,7 @@ use core::{
 };
 
 #[cfg(loom)]
-use ::loom::cell::Cell;
-#[cfg(loom)]
-use loom as atomic;
+use loom::{cell::Cell, sync::atomic};
 #[cfg(not(loom))]
 #[cfg(feature = "portable-atomic")]
 use portable_atomic as atomic;
@@ -46,9 +44,6 @@ use crate::{
     wait_until::{WaitUntil, WakeCondition},
 };
 
-#[cfg(loom)]
-#[doc(hidden)]
-pub mod loom;
 pub mod registration;
 mod state_machine;
 pub mod synchronization;
@@ -370,7 +365,7 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> SpmcWaker<S
             struct ResetRegistering<'a>(&'a AtomicState, State);
             impl Drop for ResetRegistering<'_> {
                 fn drop(&mut self) {
-                    self.0.swap(self.1, SeqCst); // !ORDERING
+                    self.0.swap(self.1, SeqCst);
                 }
             }
             let guard = R::SAFE.then(|| ResetRegistering(&self.state, state));

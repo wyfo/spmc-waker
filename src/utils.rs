@@ -101,16 +101,12 @@ impl ConfirmedWaker {
     }
 
     pub(crate) fn wake(mut self) {
-        #[cfg(loom)]
-        crate::loom_trace!("Waker::wake");
         self.waker.take().unwrap().wake();
         self.cell().set(0);
         core::mem::forget(self);
     }
 
     pub(crate) fn wake_by_ref(&self) {
-        #[cfg(loom)]
-        crate::loom_trace!("Waker::wake_by_ref");
         self.waker.as_ref().unwrap().wake_by_ref();
         self.cell().get();
     }
@@ -119,8 +115,6 @@ impl ConfirmedWaker {
 #[cfg(any(loom, miri))]
 impl Drop for ConfirmedWaker {
     fn drop(&mut self) {
-        #[cfg(loom)]
-        crate::loom_trace!("Waker::drop");
         self.cell().set(0);
     }
 }

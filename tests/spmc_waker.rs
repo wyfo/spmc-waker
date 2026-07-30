@@ -23,24 +23,18 @@ use std::{
 #[cfg(not(loom))]
 use futures::executor::block_on;
 #[cfg(loom)]
-use loom::hint::spin_loop;
+use loom::{
+    hint::spin_loop,
+    model,
+    sync::atomic::{fence, AtomicUsize},
+};
 use rstest::rstest;
-#[cfg(loom)]
-use spmc_waker::loom::{fence, AtomicUsize};
 use spmc_waker::{
     registration::{Lenient, RegistrationPolicy, Strict, Unchecked},
     synchronization::{Sequential, Synchronization, Synchronized, Unsynchronized},
     wait_until::WakeCondition,
     SpmcWaker,
 };
-
-#[cfg(loom)]
-fn model(f: impl Fn() + Sync + Send + 'static) {
-    loom::model(move || {
-        spmc_waker::loom::clear_trace();
-        f()
-    });
-}
 
 #[cfg(loom)]
 mod thread {
@@ -131,6 +125,11 @@ fn block_on<F: core::future::Future>(f: F) -> F::Output {
         let mut cx = std::task::Context::from_waker(&waker);
         f.as_mut().poll(&mut cx)
     }))
+}
+
+#[cfg(not(loom))]
+fn model(f: impl Fn() + Sync + Send + 'static) {
+    f();
 }
 
 struct SyncMode<S: Synchronization> {
@@ -298,9 +297,14 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> SpmcWakerEx
     }
 }
 
-#[cfg(not(loom))]
-fn model(f: impl Fn() + Sync + Send + 'static) {
-    f();
+/// Loom doesn't support `SeqCst` operation, so `S=Sequential` tests must be skipped
+macro_rules! loom_skip_sequential {
+    ($S:ident) => {
+        #[cfg(loom)]
+        if std::any::TypeId::of::<$S>() == std::any::TypeId::of::<Sequential>() {
+            return;
+        }
+    };
 }
 
 #[derive(Default)]
@@ -341,6 +345,7 @@ fn no_missed_wakeup<S: Synchronization, const CACHING: bool, R: RegistrationPoli
 ) where
     SyncMode<S>: WakeConditionAccess,
 {
+    loom_skip_sequential!(S);
     if !init.is_compatible(CACHING) {
         return;
     }
@@ -376,6 +381,7 @@ fn wait_until<S: Synchronization, const CACHING: bool, R: RegistrationPolicy>(
 ) where
     SyncMode<S>: WakeConditionAccess,
 {
+    loom_skip_sequential!(S);
     model(move || {
         let spmc = SpmcWaker::<S, CACHING, R>::new();
         let wake_condition = AtomicUsize::new(0);
@@ -450,6 +456,7 @@ fn concurrent_registrations<S: Synchronization, const CACHING: bool>(
     #[values(SYNC, SEQ, UNSYNC)] _sync: SyncMode<S>,
     #[values(NO_CACHING, CACHING)] _caching: Caching<CACHING>,
 ) {
+    loom_skip_sequential!(S);
     model(move || {
         let spmc = SpmcWaker::<S, CACHING, Lenient>::new();
         let waker1 = TestWaker::new();
@@ -526,6 +533,7 @@ fn basic_notification<S: Synchronization, const CACHING: bool, R: RegistrationPo
 ) where
     SyncMode<S>: WakeConditionAccess,
 {
+    loom_skip_sequential!(S);
     struct Chan<S: Synchronization, const C: bool, R: RegistrationPolicy> {
         num: AtomicUsize,
         task: SpmcWaker<S, C, R>,

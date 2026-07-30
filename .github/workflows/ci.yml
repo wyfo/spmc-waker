@@ -61,12 +61,12 @@ jobs:
           RUSTFLAGS: "--cfg loom -C debug_assertions"
           LOOM_MAX_PREEMPTIONS: 3
       - name: test basic_notification
-        run: cargo test --tests --release
+        run: cargo test --tests --release basic_notification
         env:
           RUSTFLAGS: "--cfg loom -C debug_assertions"
           LOOM_MAX_PREEMPTIONS: 2
       - name: check orderings
-        run: python3 check_ordering.py
+        run: ./check-ordering.sh
 
   compute-miri-seeds:
     runs-on: ubuntu-latest
