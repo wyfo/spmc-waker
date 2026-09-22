@@ -90,7 +90,7 @@ impl private::Synchronization for Sequential {
     const MODE: SyncMode = SyncMode::Sequential;
 }
 
-/// [`SpmcWaker`] relies on external synchronization between [`wake`] and [`register`]
+/// [`SpmcWaker`] relies on external synchronization between [`wake`] and [`register`].
 ///
 /// As described in [`Synchronization`] documentation, it requires either:
 /// - `SeqCst` fences to be inserted before `wake` and after `register`
