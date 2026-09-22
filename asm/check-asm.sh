@@ -65,7 +65,8 @@ check_unit() {
         [[ -n "$actual" ]] && break
     done
     # cargo/the pipe may emit CRLF on Windows; normalize to LF so generated
-    # references are platform-independent.
+    # references are platform-independent. The checked-out references may
+    # still be CRLF (core.autocrlf), so every diff below ignores trailing CRs.
     actual="${actual//$'\r'/}"
 
     local asm_file="$arch/$dir/$name.s"
@@ -108,7 +109,7 @@ check_unit() {
             echo "created: $label"
             return $RC_CREATED
         fi
-        if diff -q "$asm_file" <(printf '%s\n' "$actual") > /dev/null 2>&1; then
+        if diff -q --strip-trailing-cr "$asm_file" <(printf '%s\n' "$actual") > /dev/null 2>&1; then
             return 0
         fi
         printf '%s\n' "$actual" > "$asm_file"
@@ -120,7 +121,7 @@ check_unit() {
         echo "MISSING ref: $asm_file (run without '--check' to generate)"
         return 1
     fi
-    if diff -u "$asm_file" <(printf '%s\n' "$actual") > /dev/null 2>&1; then
+    if diff -u --strip-trailing-cr "$asm_file" <(printf '%s\n' "$actual") > /dev/null 2>&1; then
         return 0
     else
         echo "FAIL: $label"
