@@ -30,10 +30,11 @@ asm_poll_wait_until_asm:
 	ldr x8, [x8]
 	blr x8
 	mov x8, x0
-	str x1, [x21, #8]
 	add x0, x19, #9
+	str x1, [x21, #8]
 	str x8, [x21, #16]
-	swpal x0, x8, [x21]
+	stlr x0, [x21]
+	dmb ish
 	ldrb w8, [x20]
 	cbz w8, .LBB2_11
 .LBB2_8:

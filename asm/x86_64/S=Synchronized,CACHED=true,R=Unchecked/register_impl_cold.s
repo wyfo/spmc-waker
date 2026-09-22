@@ -20,6 +20,7 @@
 	mov qword ptr [r14 + 16], rax
 	mov rax, rbx
 	xchg qword ptr [r14], rax
+	lock or	dword ptr [rsp - 64], 0
 	test al, 2
 	jne .LBB1_7
 	jmp .LBB1_8
@@ -49,8 +50,8 @@
 	call qword ptr [r12]
 	mov qword ptr [r14 + 8], rdx
 	mov qword ptr [r14 + 16], rax
-	mov rax, rbx
-	xchg qword ptr [r14], rax
+	mov qword ptr [r14], rbx
+	lock or	dword ptr [rsp - 64], 0
 	jmp .LBB1_8
 .LBB1_2:
 	add rbx, 7
@@ -59,8 +60,8 @@
 	call qword ptr [rax]
 	mov qword ptr [r14 + 8], rdx
 	mov qword ptr [r14 + 16], rax
-	mov rax, rbx
-	xchg qword ptr [r14], rax
+	mov qword ptr [r14], rbx
+	lock or	dword ptr [rsp - 64], 0
 .LBB1_7:
 	mov rdi, r15
 	call qword ptr [r12 + 24]

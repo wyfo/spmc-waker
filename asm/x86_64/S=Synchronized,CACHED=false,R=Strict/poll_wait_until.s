@@ -34,8 +34,8 @@ asm_poll_wait_until_asm:
 	add rbx, 9
 	mov qword ptr [r14 + 8], rdx
 	mov qword ptr [r14 + 16], rax
-	mov rax, rbx
-	xchg qword ptr [r14], rax
+	mov qword ptr [r14], rbx
+	lock or	dword ptr [rsp - 64], 0
 	movzx eax, byte ptr [r15]
 	test al, al
 	je .LBB2_11

@@ -8,7 +8,8 @@ asm_wake_asm:
 	mov x19, x0
 	mov x21, x8
 	tbnz w8, #0, .LBB6_2
-	ldsetl xzr, x21, [x19]
+	dmb ish
+	ldr x21, [x19]
 	tbz w21, #0, .LBB6_9
 .LBB6_2:
 	dmb ishld
@@ -37,7 +38,8 @@ asm_wake_asm:
 	br x1
 .LBB6_6:
 	tbz w8, #0, .LBB6_9
-	ldsetl xzr, x21, [x19]
+	dmb ish
+	ldr x21, [x19]
 	tbz w21, #0, .LBB6_9
 	dmb ishld
 	sub x23, x21, #1

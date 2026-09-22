@@ -11,7 +11,7 @@ A wait-free synchronization primitive for task wakeup.
 
 #### Customizable synchronization
 
-By default, `SpmcWaker::wake` always synchronizes with `SpmcWaker::register`, same as `AtomicWaker`.
+`SpmcWaker` should be paired with a wake condition, satisfied **before** waking the task, and checked **after** registering the task's waker to not miss a concurrent notification that happened before. By default, the wake condition can be accessed with `Relaxed` ordering.
 
 However, `SpmcWaker` provides a generic `S: Synchronization` parameter, which allows customizing its synchronization guarantees, for example to relax them if the wake condition is already synchronized enough by itself. It can reduce `wake` to a simple atomic load when no waker is registered, which can bring a significant performance gain in some workflows.
 
@@ -110,15 +110,13 @@ fn event() -> (Notifier, Waiter) {
 
 See [benchmark results](benches/README.md). The following table compares the atomic operations of `register` and `wake` methods for the different primitives.
 
-|                         | `AtomicWaker`              | `SpmcWaker<Synchronized>` (default)           | `SpmcWaker<Sequential>`          | `SpmcWaker<Unsynchronized>`                   |
-|-------------------------|----------------------------|-----------------------------------------------|----------------------------------|-----------------------------------------------|
-| register                | RMW(Acquire) + RMW(AcqRel) | RMW(Relaxed)[^1] + RMW(AcqRel)                | RMW(Relaxed)[^1] + store(SeqCst) | RMW(Relaxed)[^1] + store(Release)             |
-| wake (waker registered) | RMW(AcqRel) + RMW(Release) | load(Relaxed) + fence(Acquire) + RMW(Release) | load(SeqCst) + RMW(Release)      | load(Relaxed) + fence(Acquire) + RMW(Release) |
-| wake (no waker)         | RMW(AcqRel) + RMW(Release) | load(Relaxed) + RMW(Release)[^2]              | load(SeqCst)                     | load(Relaxed)                                 |
+|                         | `AtomicWaker`              | `SpmcWaker<Synchronized>` (default)               | `SpmcWaker<Sequential>`          | `SpmcWaker<Unsynchronized>`                   |
+|-------------------------|----------------------------|---------------------------------------------------|----------------------------------|-----------------------------------------------|
+| register                | RMW(Acquire) + RMW(AcqRel) | RMW(Relaxed)[^1] + store(Release) + fence(SeqCst) | RMW(Relaxed)[^1] + store(SeqCst) | RMW(Relaxed)[^1] + store(Release)             |
+| wake (waker registered) | RMW(AcqRel) + RMW(Release) | load(Relaxed) + fence(Acquire) + RMW(Release)     | load(SeqCst) + RMW(Release)      | load(Relaxed) + fence(Acquire) + RMW(Release) |
+| wake (no waker)         | RMW(AcqRel) + RMW(Release) | load(Relaxed) + fence(SeqCst) + load(Relaxed)     | load(SeqCst)                     | load(Relaxed)                                 |
 
 [^1]: the RMW is only present for safe registration policies, i.e. `R=Strict`/`R=Lenient`; with `R=Unchecked` and unsafe `register`, it is replaced by `load(Relaxed)`.
-
-[^2]: the RMW is a `fetch_add(0)`, which is equivalent **on x86** to a `SeqCst` fence; as a consequence (still on x86), it doesn't touch the `SpmcWaker` cache line, which stays read-only and uncontended.
 
 Compared to `AtomicWaker`, `SpmcWaker` reduces the number of RMW operations in all operations. `Sequential` and `Unsynchronized` variants go even further by reducing `wake` to single atomic load when no waker is registered.
 
@@ -130,9 +128,9 @@ As illustrated in the example, `SpmcWaker` is designed to be used in MPSC algori
 
 `tokio::sync::mpsc` uses `AtomicWaker` internally (actually, it uses a custom implementation with better panic handling but the exact same algorithm), calling `AtomicWaker::wake` in `send` hot path. As a result, it systematically pays two contended RMWs.
 
-Replacing `AtomicWaker` with `SpmcWaker<Synchronized>` removes one RMW from the hot path (the other one is uncontended on x86). Because the mpsc receiver is a single consumer, registration is never concurrent, so the `Unchecked` registration policy is used with unsafe block around registration.
+Replacing `AtomicWaker` with `SpmcWaker<Synchronized>` removes both RMWs from the hot path, replaced by a `SeqCst` fence which doesn't contend on the `SpmcWaker` cache line. Because the mpsc receiver is a single consumer, registration is never concurrent, so the `Unchecked` registration policy is used with unsafe block around registration.
 
-Also, because the wake condition is already set with a `Release` RMW, `SpmcWaker<Unsynchronized>` variant can be used by replacing the RMW ordering with `AcqRel` (and checking the wake condition with an `AcqRel` RMW instead of an `Acquire` load, but only after registering the waker). As a consequence, it removes the second RMW from the hot path when no waker is registered, which is significant on x86.
+Also, because the wake condition is already set with a `Release` RMW, `SpmcWaker<Unsynchronized>` variant can be used by replacing the RMW ordering with `AcqRel` (and checking the wake condition with an `AcqRel` RMW instead of an `Acquire` load, but only after registering the waker). As a consequence, it removes the `SeqCst` fence from the hot path when no waker is registered.
 
 The following table presents the results of tokio's own mpsc benchmark depending on the atomic waker used. These results come with an important caveat: channel benchmarks are often dominated by cache-line contention, whose effects are hardly predictable; a "faster" algorithm may sometimes lead to more contention and give disastrous results in benchmarks. Also, the atomic waker is not the main part of the whole MPSC channel algorithm. Still, the replacement of `AtomicWaker` seems to produce a noticeable effect on the results.
 

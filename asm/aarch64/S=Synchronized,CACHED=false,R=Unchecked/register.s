@@ -11,7 +11,8 @@ asm_register_asm:
 	blr x8
 	str x1, [x19, #8]
 	str x0, [x19, #16]
-	swpal x20, x8, [x19]
+	stlr x20, [x19]
+	dmb ish
 	ldp x20, x19, [sp, #16]
 	ldp x29, x30, [sp], #32
 	ret
