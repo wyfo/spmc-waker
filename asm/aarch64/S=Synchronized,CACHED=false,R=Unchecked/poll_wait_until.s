@@ -19,7 +19,8 @@ asm_poll_wait_until_asm:
 	blr x8
 	str x1, [x19, #8]
 	str x0, [x19, #16]
-	swpal x21, x8, [x19]
+	stlr x21, [x19]
+	dmb ish
 	ldrb w8, [x20]
 	cbz w8, .LBB2_8
 .LBB2_4:

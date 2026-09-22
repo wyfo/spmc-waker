@@ -12,7 +12,8 @@ asm_register_asm:
 	call qword ptr [rax]
 	mov qword ptr [r14 + 8], rdx
 	mov qword ptr [r14 + 16], rax
-	xchg qword ptr [r14], rbx
+	mov qword ptr [r14], rbx
+	lock or	dword ptr [rsp - 64], 0
 	add rsp, 8
 	pop rbx
 	pop r14

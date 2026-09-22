@@ -73,8 +73,7 @@ pub mod wait_until;
 /// `SpmcWaker` has a generic `S` parameter which determines the synchronization guarantees. See
 /// [`Synchronization`] documentation for more details about its variants.
 ///
-/// With the default [`Synchronized`], calling `register` "acquires" all memory "released" by calls
-/// to `wake` before the call to `register`. Later calls to `wake` will wake the registered waker.
+/// With the default [`Synchronized`], the wake condition can be accessed with `Relaxed` ordering.
 ///
 /// # Waker caching
 ///
@@ -373,26 +372,20 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> SpmcWaker<S
             mem::forget(guard);
         }
         match S::MODE {
-            // Acquire ordering is necessary to synchronize with `wake`, so swap
-            // must be used. Release is necessary if waker has been stored.
-            // Otherwise, the swap write can be relaxed: a `wake` claiming this
-            // registration still acquires the data through the release sequence
-            // of the previous registration of the same waker, as every state
-            // updates are RMWs.
-            SyncMode::Synchronized => {
-                (self.state).swap(new_state, if waker.is_some() { AcqRel } else { Acquire });
-            }
             // Storing the state with SeqCst is necessary for the pattern
             // `store X; load Y || store Y; load X` to not miss any
             // notification, where X is the wake condition and Y the state.
             SyncMode::Sequential => self.state.store(new_state, SeqCst),
-            // Even if synchronization is handled by the user and no data is
+            // Even if synchronization might be handled by the user and no data is
             // written, Release is still needed to synchronize with the initial
             // data write, which happens before (either on the same thread with
             // Unchecked, or in another thread with R::SAFE but with Acquire-Release
             // synchronization). The store is in fact breaking the release-sequence
             // headed by the initial store.
-            SyncMode::Unsynchronized => self.state.store(new_state, Release),
+            _ => self.state.store(new_state, Release),
+        }
+        if S::SYNC {
+            fence(SeqCst);
         }
         new_state
     }
@@ -425,13 +418,15 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> SpmcWaker<S
                 // (The ordering could be factorized with a unique swap, but it would
                 // mess with ordering downgrading parsing)
                 let old_state = match S::MODE {
-                    SyncMode::Synchronized => self.state.swap(new_state, AcqRel),
                     SyncMode::Sequential => self.state.swap(new_state, SeqCst),
-                    SyncMode::Unsynchronized => self.state.swap(new_state, Release),
+                    _ => self.state.swap(new_state, Release),
                 };
+                if S::SYNC {
+                    fence(SeqCst);
+                }
                 // If the old waker was concurrently cached, drop it, but emit an Acquire fence
-                // first (if not already handled by the swap ordering) to ensure `wake_by_ref`
-                // happens before the drop.
+                // first (if not already handled by the SeqCst swap or fence above) to ensure
+                // `wake_by_ref` happens before the drop.
                 if old_state.has(CACHED) {
                     if matches!(S::MODE, SyncMode::Unsynchronized) {
                         fence(Acquire);
@@ -490,25 +485,23 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> SpmcWaker<S
         }
     }
 
-    fn registered_impl(&self) -> Option<(State, S::Released)> {
+    fn is_registered(&self) -> Option<(State, bool)> {
         // Load the state with ordering depending on the synchronization:
+        // - Synchronized requires a SeqCst fence to not miss concurrent registration, but it is
+        //   not necessary if a waker is already seen as registered with a Relaxed load
         // - Sequential requires a SeqCst load
-        // - Synchronized requires a RMW release on the state, but this one can be done to take
-        //   the ownership of the registered waker; the initial load before the RMW can thus be
-        //   Relaxed
         // - Unsynchronized has it synchronization handled by the wake condition, the load can be
         //   Relaxed
         let mut state = self.state.load(match S::MODE {
             SyncMode::Sequential => SeqCst,
             _ => Relaxed,
         });
-        let mut released = false;
-        // If S::SYNC and there is no waker registered, a Release RMW must still be executed.
-        // As the state doesn't need to be modified, `fetch_add(0)` can be used, as it has the
-        // advantage to be optimized on x86 architectures.
+        // If S::SYNC and there is no waker registered, a SeqCst fence must still be emitted.
+        let mut synchronized = false;
         if S::SYNC && !state.has(REGISTERED) {
-            state = self.state.fetch_add(0, Release);
-            released = true;
+            fence(SeqCst);
+            state = self.state.load(Relaxed);
+            synchronized = true;
         }
         // No waker registered, return None.
         if !state.has(REGISTERED) {
@@ -529,14 +522,14 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> SpmcWaker<S
         if !matches!(S::MODE, SyncMode::Sequential) {
             fence(Acquire);
         }
-        Some((state, released.into()))
+        Some((state, synchronized))
     }
 
     /// Consumes the latest `Waker` registered and returns it.
     #[inline]
     pub fn take(&self) -> Option<Waker> {
-        let (state, released) = self.registered_impl()?;
-        let (waker, _) = self.take_impl(state, released)?;
+        let (state, synchronized) = self.is_registered()?;
+        let (waker, _) = self.take_impl(state, synchronized)?;
         #[cfg(any(loom, miri))]
         let waker = waker.get();
         Some(waker)
@@ -546,10 +539,9 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> SpmcWaker<S
     fn take_impl(
         &self,
         mut state: State,
-        mut released: S::Released,
+        mut synchronized: bool,
     ) -> Option<(ConfirmedWaker, State)> {
         // Claim the waker ownership with a CAS.
-        debug_assert!(state.has(REGISTERED));
         loop {
             // Load the waker before updating the state. If the update succeeds, then
             // the waker is ensured to be valid.
@@ -558,17 +550,15 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> SpmcWaker<S
             if ((self.state).compare_exchange(state, new_state, Release, Relaxed)).is_ok() {
                 return Some((waker.confirm(state), new_state));
             }
-            // Same as registered_impl. With S::SYNC, if the update failed, a Release RMW must
+            // Same as is_registered. With S::SYNC, if the update failed, a SeqCst fence must
             // still be executed if it has not been done before.
-            if S::SYNC && !released.into() {
-                state = self.state.fetch_add(0, Release);
-                released = true.into();
+            if S::SYNC && !synchronized {
+                fence(SeqCst);
+                state = self.state.load(Relaxed);
+                synchronized = true;
                 // Try claiming the new waker if there is one.
                 if state.has(REGISTERED) {
-                    // Same as registered_impl, the fence is necessary to load the waker.
-                    if !matches!(S::MODE, SyncMode::Sequential) {
-                        fence(Acquire);
-                    }
+                    fence(Acquire);
                     continue;
                 }
             }
@@ -579,8 +569,8 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> SpmcWaker<S
     /// Consumes the latest `Waker` registered and wakes its task.
     #[inline]
     pub fn wake(&self) {
-        if let Some((state, released)) = self.registered_impl() {
-            self.wake_impl(state, released);
+        if let Some((state, synchronized)) = self.is_registered() {
+            self.wake_impl(state, synchronized);
         }
     }
 
@@ -590,14 +580,14 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> SpmcWaker<S
     /// `wake` when waking is the uncommon case.
     #[inline]
     pub fn wake_cold(&self) {
-        if let Some((state, released)) = self.registered_impl() {
-            self.wake_impl_cold(state, released);
+        if let Some((state, synchronized)) = self.is_registered() {
+            self.wake_impl_cold(state, synchronized);
         }
     }
 
     #[inline(always)]
-    fn wake_impl(&self, state: State, released: S::Released) {
-        if let Some((waker, state)) = self.take_impl(state, released) {
+    fn wake_impl(&self, state: State, synchronized: bool) {
+        if let Some((waker, state)) = self.take_impl(state, synchronized) {
             // If caching is enabled, use `Waker::wake_by_ref` and try to update the state back
             // with the CACHED state, giving back the ownership of the waker. If it fails, drop it.
             if CACHING {
@@ -614,8 +604,8 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> SpmcWaker<S
     }
 
     #[cold]
-    fn wake_impl_cold(&self, state: State, released: S::Released) {
-        self.wake_impl(state, released);
+    fn wake_impl_cold(&self, state: State, synchronized: bool) {
+        self.wake_impl(state, synchronized);
     }
 }
 

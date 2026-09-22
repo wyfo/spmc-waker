@@ -15,7 +15,8 @@
 	blr x8
 	str x1, [x20, #8]
 	str x0, [x20, #16]
-	swpal x19, x8, [x20]
+	swpl x19, x8, [x20]
+	dmb ish
 	tbnz w8, #1, .LBB1_12
 .LBB1_3:
 	mov x0, x19
@@ -48,7 +49,8 @@
 	blr x8
 	str x1, [x20, #8]
 	str x0, [x20, #16]
-	swpal x19, x8, [x20]
+	stlr x19, [x20]
+	dmb ish
 	mov x0, x19
 	ldp x20, x19, [sp, #32]
 	ldp x22, x21, [sp, #16]
@@ -61,7 +63,8 @@
 	blr x8
 	str x1, [x20, #8]
 	str x0, [x20, #16]
-	swpal x19, x8, [x20]
+	stlr x19, [x20]
+	dmb ish
 .LBB1_12:
 	ldr x8, [x22, #24]
 	mov x0, x21

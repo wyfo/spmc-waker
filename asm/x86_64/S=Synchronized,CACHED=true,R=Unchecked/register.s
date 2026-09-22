@@ -9,5 +9,6 @@ asm_register_asm:
 	cmp rax, qword ptr [rsi]
 	jne <spmc_waker::SpmcWaker<spmc_waker::synchronization::Synchronized, true, spmc_waker::registration::Unchecked>>::register_impl_cold
 	add rdx, 7
-	xchg qword ptr [rdi], rdx
+	mov qword ptr [rdi], rdx
+	lock or	dword ptr [rsp - 64], 0
 	ret

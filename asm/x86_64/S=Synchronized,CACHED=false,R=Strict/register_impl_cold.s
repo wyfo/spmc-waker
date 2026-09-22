@@ -16,16 +16,16 @@
 	xor rdx, rax
 	or rdx, rcx
 	jne .LBB1_1
-	mov rax, rbx
-	xchg qword ptr [r14], rax
+	mov qword ptr [r14], rbx
+	lock or	dword ptr [rsp - 64], 0
 	jmp .LBB1_4
 .LBB1_1:
 	call qword ptr [rax]
 	add rbx, 8
 	mov qword ptr [r14 + 8], rdx
 	mov qword ptr [r14 + 16], rax
-	mov rax, rbx
-	xchg qword ptr [r14], rax
+	mov qword ptr [r14], rbx
+	lock or	dword ptr [rsp - 64], 0
 	mov rdi, r15
 	call qword ptr [r12 + 24]
 .LBB1_4:

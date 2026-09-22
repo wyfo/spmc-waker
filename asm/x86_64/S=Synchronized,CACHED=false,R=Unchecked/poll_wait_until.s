@@ -20,8 +20,8 @@ asm_poll_wait_until_asm:
 	call qword ptr [rax]
 	mov qword ptr [rbx + 8], rdx
 	mov qword ptr [rbx + 16], rax
-	mov rax, r15
-	xchg qword ptr [rbx], rax
+	mov qword ptr [rbx], r15
+	lock or	dword ptr [rsp - 64], 0
 	movzx eax, byte ptr [r14]
 	test al, al
 	je .LBB2_8

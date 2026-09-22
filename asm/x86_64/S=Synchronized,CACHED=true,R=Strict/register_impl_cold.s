@@ -29,8 +29,8 @@
 	or rdx, rcx
 	jne .LBB1_11
 .LBB1_8:
-	mov rax, rbx
-	xchg qword ptr [r14], rax
+	mov qword ptr [r14], rbx
+	lock or	dword ptr [rsp - 64], 0
 	jmp .LBB1_9
 .LBB1_2:
 	mov r15, qword ptr [r14 + 8]
@@ -46,8 +46,8 @@
 .LBB1_4:
 	mov qword ptr [r14 + 8], rdx
 	mov qword ptr [r14 + 16], rax
-	mov rax, rbx
-	xchg qword ptr [r14], rax
+	mov qword ptr [r14], rbx
+	lock or	dword ptr [rsp - 64], 0
 	mov rdi, r15
 	call qword ptr [r12 + 24]
 .LBB1_9:
