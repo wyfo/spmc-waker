@@ -46,12 +46,12 @@ impl<
 
 /// Wake condition returned by closure passed in [`SpmcWaker::wait_until`].
 ///
-/// Typically implemented by `bool` and `Option<T>`. When met, it provides
+/// Typically implemented by `bool` and `Option<T>`. When satisfied, it provides
 /// an output that can be returned by `wait_until`.
 pub trait WakeCondition {
-    /// Wake condition output when met.
+    /// Wake condition output when satisfied.
     type Output;
-    /// Try getting the wake condition output, thereby checking if it is met.
+    /// Try getting the wake condition output, thereby checking if it is satisfied.
     fn try_into_output(self) -> Option<Self::Output>;
 }
 

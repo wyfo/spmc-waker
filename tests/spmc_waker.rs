@@ -365,7 +365,7 @@ fn no_missed_wakeup<S: Synchronization, const CACHING: bool, R: RegistrationPoli
             });
         });
         assert!(*wake_cond_loaded.wait() == 1 || wake_count.load() == 1);
-        // If `wake` happened before `register`, then the wake condition must be met.
+        // If `wake` happened before `register`, then the wake condition must be satisfied.
         if spmc.take().is_some() {
             assert_eq!(*wake_cond_loaded.wait(), 1);
         }

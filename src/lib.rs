@@ -56,9 +56,9 @@ pub mod wait_until;
 /// concurrently from multiple threads. A single instance may be reused for any number of waker
 /// registrations/calls.
 ///
-/// `SpmcWaker` should be paired with a wake condition, met **before** waking the task, and checked
-/// **after** registering the task's waker to not miss a concurrent notification that happened
-/// before.
+/// `SpmcWaker` should be paired with a wake condition, satisfied **before** waking the task, and
+/// checked **after** registering the task's waker to not miss a concurrent notification that
+/// happened before.
 ///
 /// `SpmcWaker` also provides a high-level async [`wait_until`](Self::wait_until), backed by
 /// [`poll_wait_until`](Self::poll_wait_until), which is often more optimized than manual
@@ -272,7 +272,7 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> SpmcWaker<S
         cx: &mut Context,
         mut wake_condition: F,
     ) -> Poll<W::Output> {
-        // Quick check to avoid registration if the wake condition is already met.
+        // Quick check to avoid registration if the wake condition is already satisfied.
         if let Some(out) = wake_condition(false).try_into_output() {
             return Poll::Ready(out);
         }
@@ -620,16 +620,15 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> SpmcWaker<S
 }
 
 impl<S: Synchronization, const CACHING: bool, R: SafeRegistration> SpmcWaker<S, CACHING, R> {
-    /// Wait until the given wake condition is met.
+    /// Wait until the given wake condition is satisfied.
     ///
-    /// The method accepts a closure which takes in parameter a boolean telling whether the waker
-    /// is already registered when the closure is called. In fact, the closure is executed a first
-    /// time before registering the waker (see [`poll_wait_until`](Self::poll_wait_until)
-    /// documentation). This parameter can be used to relax the first wake condition's check when a
+    /// At each poll of the returned future, the wake condition is checked before and after
+    /// registering the task waker. The closure is passed a boolean telling whether the waker is
+    /// already registered when it is called; it can be used to relax the first check when a
     /// non-default [`Synchronization`] is used.
     ///
     /// Notifier threads should call [`wake`](Self::wake) (or [`wake_cold`](Self::wake_cold))
-    /// after wake condition is met.
+    /// after wake condition is satisfied.
     ///
     /// # Panics
     ///
@@ -643,22 +642,22 @@ impl<S: Synchronization, const CACHING: bool, R: SafeRegistration> SpmcWaker<S, 
         WaitUntil::new(self, wake_condition)
     }
 
-    /// Returns `Poll::Ready` if the wake condition is met, or registers
+    /// Returns `Poll::Ready` if the wake condition is satisfied, or registers
     /// the task's waker to be notified.
     ///
-    /// The method accepts a closure which takes in parameter a boolean telling whether the waker
+    /// The method accepts a closure which is passed a boolean telling whether the waker
     /// is already registered when the closure is called. This parameter can be used to relax the
     /// first wake condition's check when a non-default [`Synchronization`] is used.
     ///
     /// Notifier threads should call [`wake`](Self::wake) (or [`wake_cold`](Self::wake_cold))
-    /// after wake condition is met.
+    /// after wake condition is satisfied.
     ///
     /// It is equivalent to the following code:
     /// ```
     /// # use std::task::{Context, Poll};
     /// # use spmc_waker::SpmcWaker;
     /// # fn poll_wait_until(spmc_waker: &SpmcWaker, cx: &mut Context, wake_condition: impl Fn(bool) -> bool) -> Poll<()> {
-    ///     // quick check to avoid registration if the wake condition is already met
+    ///     // quick check to avoid registration if the wake condition is already satisfied
     ///     if wake_condition(false) {
     ///         return Poll::Ready(());
     ///     }
@@ -693,7 +692,7 @@ impl<S: Synchronization, const CACHING: bool, R: SafeRegistration> SpmcWaker<S, 
     /// wakeup.
     ///
     /// Returns a [`Registered`] token, which can be used to unregister the waker if
-    /// the wake condition is met, avoiding spurious wakeup.
+    /// the wake condition is satisfied, avoiding spurious wakeup.
     ///
     /// See [`poll_wait_until`](Self::poll_wait_until) documentation about how to use
     /// `register`.
@@ -709,21 +708,21 @@ impl<S: Synchronization, const CACHING: bool, R: SafeRegistration> SpmcWaker<S, 
 }
 
 impl<S: Synchronization, const CACHING: bool> SpmcWaker<S, CACHING, Unchecked> {
-    /// Wait until the given wake condition is met.
+    /// Wait until the given wake condition is satisfied.
     ///
-    /// The method accepts a closure which takes in parameter a boolean telling whether the waker
-    /// is already registered when the closure is called. In fact, the closure is executed a first
-    /// time before registering the waker (see [`poll_wait_until`](Self::poll_wait_until)
-    /// documentation). This parameter can be used to relax the first wake condition's check when a
+    /// At each poll of the returned future, the wake condition is checked before and after
+    /// registering the task waker. The closure is passed a boolean telling whether the waker is
+    /// already registered when it is called; it can be used to relax the first check when a
     /// non-default [`Synchronization`] is used.
     ///
     /// Notifier threads should call [`wake`](Self::wake) (or [`wake_cold`](Self::wake_cold))
-    /// after wake condition is met.
+    /// after wake condition is satisfied.
     ///
     /// # Safety
     ///
-    /// Polling the returned future calls `poll_wait_until` and inherits its safety condition.
-    /// Basically, only a single thread should await a wake condition at a time.
+    /// Polling the returned future calls [`poll_wait_until`](Self::poll_wait_until) and inherits
+    /// its safety condition. Basically, only a single thread should await a wake condition at a
+    /// time.
     #[inline]
     pub unsafe fn wait_until<F: FnMut(bool) -> W, W: WakeCondition>(
         &self,
@@ -732,22 +731,22 @@ impl<S: Synchronization, const CACHING: bool> SpmcWaker<S, CACHING, Unchecked> {
         WaitUntil::new(self, wake_condition)
     }
 
-    /// Returns `Poll::Ready` if the wake condition is met, or registers
+    /// Returns `Poll::Ready` if the wake condition is satisfied, or registers
     /// the task's waker to be notified.
     ///
-    /// The method accepts a closure which takes in parameter a boolean telling whether the waker
+    /// The method accepts a closure which is passed a boolean telling whether the waker
     /// is already registered when the closure is called. This parameter can be used to relax the
     /// first wake condition's check when a non-default [`Synchronization`] is used.
     ///
     /// Notifier threads should call [`wake`](Self::wake) (or [`wake_cold`](Self::wake_cold))
-    /// after wake condition is met.
+    /// after wake condition is satisfied.
     ///
     /// It is equivalent to the following code:
     /// ```
     /// # use std::task::{Context, Poll};
     /// # use spmc_waker::SpmcWaker;
     /// # fn poll_wait_until(spmc_waker: &SpmcWaker, cx: &mut Context, wake_condition: impl Fn(bool) -> bool) -> Poll<()> {
-    ///     // quick check to avoid registration if the wake condition is already met.
+    ///     // quick check to avoid registration if the wake condition is already satisfied.
     ///     if wake_condition(false) {
     ///         return Poll::Ready(());
     ///     }
@@ -782,7 +781,7 @@ impl<S: Synchronization, const CACHING: bool> SpmcWaker<S, CACHING, Unchecked> {
     /// wakeup.
     ///
     /// Returns a [`Registered`] token, which can be used to unregister the waker if
-    /// the wake condition is met, avoiding spurious wakeup.
+    /// the wake condition is satisfied, avoiding spurious wakeup.
     ///
     /// See [`poll_wait_until`](Self::poll_wait_until) documentation about how to use
     /// `register`.
@@ -804,7 +803,8 @@ impl<S: Synchronization, const CACHING: bool, R: RegistrationPolicy> Default
     }
 }
 
-/// Token returned by [`SpmcWaker::register`] to unregister the waker if the wake condition is met.
+/// Token returned by [`SpmcWaker::register`] to unregister the waker if the wake condition is
+/// satisfied.
 pub struct Registered<
     'a,
     S: Synchronization = Synchronized,
@@ -826,7 +826,7 @@ impl<'a, S: Synchronization, const CACHING: bool, R: RegistrationPolicy>
 
     /// Unregisters the previously registered waker.
     ///
-    /// It allows avoiding spurious wakeups if the wake condition is already met.
+    /// It allows avoiding spurious wakeups if the wake condition is already satisfied.
     #[inline]
     pub fn unregister(self) {
         let mut new_state = self.state.unset(REGISTERED);

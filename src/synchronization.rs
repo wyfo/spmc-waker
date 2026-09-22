@@ -8,7 +8,7 @@ use core::fmt::Debug;
 /// `SpmcWaker` uses the `store X; load Y || store Y; load X` pattern, where `X` is the wake
 /// condition, and `Y` the waker registration state (`load Y` is done in [`wake`] while `store Y`
 /// corresponds to [`register`]). There are four main ways to make this pattern work, i.e., either
-/// `load Y` sees a waker registered, or `load X` sees the wake condition met:
+/// `load Y` sees a waker registered, or `load X` sees the wake condition satisfied:
 /// - every operation uses `SeqCst`
 /// - insert `SeqCst` fences between stores and loads
 /// - use RMW operations for `X` store + load, with `Acquire` ordering for store and `Release`
