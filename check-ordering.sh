@@ -10,7 +10,11 @@ cd "$(dirname "$0")"
 # even `--cfg=loom` instead of `--cfg loom` would rebuild the whole dependency graph.
 # `loom_downgrade.sh` records this value and exports it for the downgraded runs.
 export RUSTFLAGS="--cfg loom -C debug_assertions"
-# Every downgrade is caught at a single preemption, so no escalation is needed.
+# Nearly every downgrade is caught at a single preemption, which is by far the cheapest pass:
+# an uncaught downgrade explores the whole schedule space, whose size explodes with the number
+# of preemptions. The few needing two (e.g. the Acquire fence of the `take_impl` retry, reached
+# only after a concurrent `wake` and a new registration) are retried at two preemptions, see
+# `retry` below.
 export LOOM_MAX_PREEMPTIONS=1
 
 # `no_missed_wakeup` alone executes every ordering and catches every downgrade of them, so run
@@ -33,4 +37,8 @@ test=(
 LOOM_DOWNGRADE=collect "${test[@]}" > /dev/null 2>&1 ||
     { echo "ordering collection failed" >&2 && exit 1; }
 
-./loom_downgrade.sh "${test[@]}"
+# `loom_downgrade.sh` runs its command once per downgrade, expecting a failure when the
+# downgrade is caught, so a run passing at a single preemption is retried at two before being
+# reported as uncaught. `exit` without argument forwards the status of the failed run, and
+# `retry` only fills `bash -c`'s `$0` so that the test command lands in `$@`.
+./loom_downgrade.sh bash -c '"$@" || exit; LOOM_MAX_PREEMPTIONS=2 "$@"' retry "${test[@]}"

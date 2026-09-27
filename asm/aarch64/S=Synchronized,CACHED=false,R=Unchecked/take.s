@@ -3,7 +3,8 @@ asm_take_asm:
 	mov x8, x0
 	mov x10, x9
 	tbnz w9, #0, .LBB4_2
-	ldsetl xzr, x10, [x8]
+	dmb ish
+	ldr x10, [x8]
 	tbz w10, #0, .LBB4_7
 .LBB4_2:
 	dmb ishld
@@ -18,7 +19,8 @@ asm_take_asm:
 	ret
 .LBB4_4:
 	tbz w9, #0, .LBB4_7
-	ldsetl xzr, x9, [x8]
+	dmb ish
+	ldr x9, [x8]
 	tbz w9, #0, .LBB4_7
 	dmb ishld
 	sub x10, x9, #1

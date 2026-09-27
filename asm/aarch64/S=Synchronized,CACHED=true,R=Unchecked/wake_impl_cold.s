@@ -31,7 +31,8 @@
 	br x1
 .LBB0_5:
 	tbnz w2, #0, .LBB0_8
-	ldsetl xzr, x20, [x19]
+	dmb ish
+	ldr x20, [x19]
 	tbz w20, #0, .LBB0_8
 	dmb ishld
 	sub x23, x20, #1

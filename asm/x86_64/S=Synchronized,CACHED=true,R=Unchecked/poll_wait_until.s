@@ -5,6 +5,9 @@ asm_poll_wait_until_asm:
 	xor eax, eax
 	ret
 .LBB2_1:
+	push r14
+	push rbx
+	push rax
 	mov rsi, qword ptr [rsi]
 	mov rax, qword ptr [rdi]
 	test al, 2
@@ -16,32 +19,27 @@ asm_poll_wait_until_asm:
 	cmp rcx, qword ptr [rsi]
 	jne .LBB2_5
 	add rax, 7
-	mov rcx, rax
-	xchg qword ptr [rdi], rcx
+	mov qword ptr [rdi], rax
+	lock or	dword ptr [rsp - 64], 0
+.LBB2_6:
 	movzx ecx, byte ptr [rdx]
 	test cl, cl
+	lea rsp, [rsp + 8]
+	pop rbx
+	pop r14
 	je .LBB2_7
-.LBB2_8:
 	lea rcx, [rax + 1]
 	lock cmpxchg	qword ptr [rdi], rcx
 	xor eax, eax
 	ret
+.LBB2_7:
+	mov al, 1
+	ret
 .LBB2_5:
-	push r14
-	push rbx
-	push rax
 	mov rbx, rdi
 	mov r14, rdx
 	mov rdx, rax
 	call <spmc_waker::SpmcWaker<spmc_waker::synchronization::Synchronized, true, spmc_waker::registration::Unchecked>>::register_impl_cold
 	mov rdx, r14
 	mov rdi, rbx
-	add rsp, 8
-	pop rbx
-	pop r14
-	movzx ecx, byte ptr [rdx]
-	test cl, cl
-	jne .LBB2_8
-.LBB2_7:
-	mov al, 1
-	ret
+	jmp .LBB2_6

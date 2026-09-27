@@ -10,15 +10,10 @@
 	ldp x8, x0, [x1]
 	ldr x8, [x8]
 	blr x8
-	str x1, [x20, #8]
 	add x19, x19, #9
+	str x1, [x20, #8]
 	str x0, [x20, #16]
-	swpal x19, x8, [x20]
-	mov x0, x19
-	ldp x20, x19, [sp, #32]
-	ldp x22, x21, [sp, #16]
-	ldp x29, x30, [sp], #48
-	ret
+	b .LBB1_6
 .LBB1_4:
 	ldr x21, [x20, #8]
 	ldr x22, [x20, #16]
@@ -27,7 +22,9 @@
 	b.ne .LBB1_7
 	cmp x22, x8
 	b.ne .LBB1_7
-	swpa x19, x8, [x20]
+.LBB1_6:
+	stlr x19, [x20]
+	dmb ish
 	mov x0, x19
 	ldp x20, x19, [sp, #32]
 	ldp x22, x21, [sp, #16]
@@ -50,7 +47,8 @@
 .LBB1_11:
 	str x0, [x20, #16]
 	mov x0, x21
-	swpal x19, x8, [x20]
+	stlr x19, [x20]
+	dmb ish
 	ldr x8, [x22, #24]
 	blr x8
 	mov x0, x19

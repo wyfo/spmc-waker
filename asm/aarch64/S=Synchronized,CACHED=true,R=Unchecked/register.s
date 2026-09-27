@@ -10,7 +10,8 @@ asm_register_asm:
 	cmp x8, x9
 	b.ne .LBB3_4
 	add x8, x2, #7
-	swpa x8, x8, [x0]
+	stlr x8, [x0]
+	dmb ish
 	ret
 .LBB3_4:
 	b <spmc_waker::SpmcWaker<spmc_waker::synchronization::Synchronized, true, spmc_waker::registration::Unchecked>>::register_impl_cold

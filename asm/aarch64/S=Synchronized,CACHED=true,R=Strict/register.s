@@ -21,7 +21,8 @@ asm_register_asm:
 	cmp x8, x9
 	b.ne .LBB3_7
 	add x8, x2, #7
-	swpa x8, x8, [x0]
+	stlr x8, [x0]
+	dmb ish
 	ldp x29, x30, [sp], #16
 	ret
 .LBB3_7:

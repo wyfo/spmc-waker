@@ -26,8 +26,8 @@ asm_poll_wait_until_asm:
 	cmp rax, qword ptr [rsi]
 	jne .LBB2_10
 	add rcx, 7
-	mov rax, rcx
-	xchg qword ptr [rdi], rax
+	mov qword ptr [rdi], rcx
+	lock or	dword ptr [rsp - 64], 0
 	movzx eax, byte ptr [rdx]
 	test al, al
 	je .LBB2_11

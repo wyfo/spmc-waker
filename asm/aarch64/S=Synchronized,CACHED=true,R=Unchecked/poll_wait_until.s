@@ -19,7 +19,8 @@ asm_poll_wait_until_asm:
 	cmp x9, x10
 	b.ne .LBB2_7
 	add x8, x8, #7
-	swpa x8, x9, [x0]
+	stlr x8, [x0]
+	dmb ish
 	ldrb w9, [x2]
 	cbz w9, .LBB2_8
 .LBB2_6:

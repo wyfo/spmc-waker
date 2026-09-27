@@ -20,7 +20,8 @@ asm_register_asm:
 	add x8, x20, #9
 	str x1, [x19, #8]
 	str x0, [x19, #16]
-	swpal x8, x8, [x19]
+	stlr x8, [x19]
+	dmb ish
 	ldp x20, x19, [sp, #16]
 	ldp x29, x30, [sp], #32
 	ret
